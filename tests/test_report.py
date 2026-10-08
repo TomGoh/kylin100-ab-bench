@@ -59,6 +59,15 @@ class ReportTests(unittest.TestCase):
         self.assertIn("不能作为正式原厂／XHyper 对比测试结果", markdown)
         self.assertFalse(comparison["report_metadata"]["identity_verified_by_report"])
 
+    def test_row_validation_marker_cannot_be_overridden_by_formal_campaign(self):
+        for marker in ({"validation_only": True}, {"purpose": "validation"}):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as temporary:
+                target = Path(temporary) / 'report'
+                result = create_report([row('xhyper', 100, 'test', 'boot', **marker)], target,
+                                       campaign={'purpose': 'formal'})
+                self.assertTrue(result['validation_only'])
+                self.assertTrue((target / 'report.md').read_text().startswith('# 工具验证报告'))
+
     def test_empty_and_single_side_keep_missing_result(self):
         for rows in ([], [row("native", 100, "n", "nb")]):
             with self.subTest(rows=rows), tempfile.TemporaryDirectory() as temporary:

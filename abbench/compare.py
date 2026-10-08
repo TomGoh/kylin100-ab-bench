@@ -10,7 +10,7 @@ from typing import Any, Iterable
 
 IDENTITY_FIELDS = ("version", "app_version", "benchmark_version", "workload_version",
                    "apk_sha256", "api", "api_raw", "tool", "unit", "configuration",
-                   "measurement_boundary", "power_boundary")
+                   "measurement_boundary", "power_boundary", "purpose", "observer")
 
 
 def _valid_flag(value: Any) -> bool:

@@ -173,10 +173,15 @@ def create_report(metric_rows, directory, *, campaign=None):
     notes = []
     comparison = _json_safe(summary, notes)
     safe_campaign = _json_safe(campaign or {}, notes, "$.campaign")
+    validation = safe_campaign.get("purpose") == "validation" or any(
+        isinstance(row, dict) and (row.get("validation_only") is True or row.get("purpose") == "validation")
+        for row in rows)
+    if validation:
+        safe_campaign["purpose"] = "validation"
     comparable = any(group["delta_pct"] is not None for group in comparison["groups"])
     metadata = {
         "purpose": safe_campaign.get("purpose"),
-        "validation_only": safe_campaign.get("purpose") == "validation",
+        "validation_only": validation,
         "has_comparable_groups": comparable, "campaign": safe_campaign,
         "serialization_notes": notes,
         "statistics_source": "abbench.compare.summarize",

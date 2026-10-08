@@ -41,6 +41,14 @@ class ComparisonTests(unittest.TestCase):
         self.assertAlmostEqual(by_api_version[("OpenCL", "6.7.1")]["delta_pct"], 50)
         self.assertIsNone(by_api_version[("Vulkan", "7.0")]["delta_pct"])
 
+    def test_validation_and_formal_observers_do_not_form_a_pair(self):
+        rows = [sample('native', 100, 'n', purpose='formal', observer='sparse'),
+                sample('xhyper', 110, 'x', purpose='validation', observer='sparse'),
+                sample('xhyper', 120, 'x2', purpose='formal', observer='different')]
+        groups = summarize(rows)['groups']
+        self.assertEqual(len(groups), 3)
+        self.assertTrue(all(group['delta_pct'] is None for group in groups))
+
     def test_comparison_key_and_measurement_boundary_partition(self):
         rows = [sample("native", 1, "n1", comparison_key={"scene": "idle"}, unit="W"),
                 sample("xhyper", 2, "x1", comparison_key={"scene": "idle"}, unit="W"),
