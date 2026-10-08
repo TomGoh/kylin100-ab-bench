@@ -217,11 +217,17 @@ def run_idle(serial, directory, kind="screen_on_idle", duration_s=None, mode="un
             old = raw.strip()
             if old != "null" and not re.fullmatch(r"\d+", old):
                 raise ValueError("original_screen_setting_unavailable_" + key)
-            result["settings"][key] = {"namespace": namespace, "original": old, "requested": value}
+            result["settings"][key] = {"namespace": namespace, "original": old,
+                                       "requested": value, "observed": old, "applied": old == value}
             if old != value:
                 # Mark before writing: a timed-out write may still have landed.
                 changed.append((namespace, key, old))
                 device.shell("settings-write", f"settings put {namespace} {key} {value}")
+                observed, _ = device.shell("settings-write-check", f"settings get {namespace} {key}")
+                result["settings"][key]["observed"] = observed.strip()
+                result["settings"][key]["applied"] = observed.strip() == value
+                if not result["settings"][key]["applied"]:
+                    raise ValueError("screen_setting_readback_mismatch_" + key)
         device.shell("screen-wake", "input keyevent 224")
         device.shell("home", "input keyevent 3")
         device.screen("on")

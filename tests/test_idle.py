@@ -15,10 +15,12 @@ OTHER = "22222222-2222-4222-8222-222222222222"
 
 class DeviceSimulation:
     def __init__(self, *, initial_screen="on", deep=False, failure=None,
-                 reboot=False, constant_charge=False, missing_suspend=False):
+                 reboot=False, constant_charge=False, missing_suspend=False,
+                 ignored_write=None):
         self.now, self.screen = 10.0, initial_screen
         self.deep, self.failure, self.reboot = deep, failure, reboot
         self.constant_charge, self.missing_suspend = constant_charge, missing_suspend
+        self.ignored_write = ignored_write
         self.settings = {"screen_off_timeout": "300000", "stay_on_while_plugged_in": "7"}
         self.original = dict(self.settings)
         self.calls, self.endpoint_count, self.suspend_count = [], 0, 0
@@ -66,7 +68,8 @@ class DeviceSimulation:
             raw = self.settings[command.split()[-1]] + "\n"
         elif "settings put" in command:
             tokens = command.split()
-            self.settings[tokens[-2]] = tokens[-1]
+            if tokens[-2] != self.ignored_write:
+                self.settings[tokens[-2]] = tokens[-1]
             raw = ""
         elif "settings delete" in command:
             self.settings[command.split()[-1]] = "null"
@@ -167,6 +170,21 @@ class IdleWindowTests(unittest.TestCase):
         self.assertEqual(simulation.settings, simulation.original)
         self.assertTrue(result["settings_restored"])
         self.assertTrue(any(item.get("timed_out") for item in events))
+
+    def test_ignored_successful_setting_write_is_rejected_and_restored(self):
+        for key in ("screen_off_timeout", "stay_on_while_plugged_in"):
+            with self.subTest(key=key):
+                simulation = DeviceSimulation(ignored_write=key)
+                result, _, start, stop = self.collect(simulation)
+                self.assertFalse(result["valid"])
+                self.assertEqual(result["reason"], "screen_setting_readback_mismatch_" + key)
+                self.assertFalse(result["settings"][key]["applied"])
+                self.assertEqual(result["settings"][key]["observed"], simulation.original[key])
+                self.assertEqual(simulation.settings, simulation.original)
+                self.assertTrue(result["settings_restored"])
+                self.assertTrue(result["restore"][key]["restored"])
+                start.assert_not_called()
+                stop.assert_not_called()
 
     def test_failure_after_sleep_restores_screen_without_toggle(self):
         simulation = DeviceSimulation(failure="voltage_candidate=")
