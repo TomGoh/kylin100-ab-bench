@@ -156,6 +156,21 @@ class UiTests(unittest.TestCase):
         with patch.object(device, "timed", side_effect=replies):
             self.assertTrue(device.new_document_id(1)["new"])
 
+    def test_transient_empty_dump_retries_new_snapshot_without_tap(self):
+        device = object.__new__(runner._Device)
+        device.remote, device.index, device.deadline = "/private", 0, None
+        empty, good = observation(""), observation("")
+        good["payload"] = self.DIALOG
+        with patch.object(device, "timed", side_effect=[empty, good]) as timed, patch("abbench.geekbench_runner.time.sleep"):
+            self.assertEqual(device.observe("home")["state"], "computing")
+            self.assertEqual(timed.call_count, 2)
+            self.assertNotEqual(timed.call_args_list[0].args[0], timed.call_args_list[1].args[0])
+            self.assertTrue(all("input tap" not in call.args[0] for call in timed.call_args_list))
+        with patch.object(device, "timed", return_value=empty) as timed, patch("abbench.geekbench_runner.time.sleep"):
+            with self.assertRaisesRegex(runner.RunnerError, "ui_xml_missing"):
+                device.observe("home")
+            self.assertEqual(timed.call_count, 3)
+
 
 class FakeDevice:
     states = ["computing", "uploading"]

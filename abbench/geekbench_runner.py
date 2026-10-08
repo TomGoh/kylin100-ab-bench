@@ -274,10 +274,22 @@ class _Device:
                 "sqlite_available": self.sqlite_available, "remote_directory": self.remote}
 
     def observe(self, label="ui"):
-        remote = self.remote + f"/ui-{self.index + 1}.xml"
-        observation = self.timed("uiautomator dump " + shlex.quote(remote) + " >/dev/null && cat " + shlex.quote(remote), label)
-        nodes = ui_nodes(observation["payload"])
-        return {**observation, "nodes": nodes, "state": classify_ui(nodes)}
+        # The platform may kill a dump during a window transition. Retry a new
+        # snapshot only; never reuse the previous XML or repeat a benchmark tap.
+        for attempt in range(3):
+            remote = self.remote + f"/ui-{self.index + 1}-{attempt}.xml"
+            observation = self.timed("uiautomator dump " + shlex.quote(remote) + " >/dev/null && cat " + shlex.quote(remote), label + f"-{attempt}")
+            try:
+                nodes = ui_nodes(observation["payload"])
+            except RunnerError as exc:
+                if str(exc) not in ("ui_xml_missing", "ui_xml_invalid") or attempt == 2:
+                    raise
+                remaining = 1 if self.deadline is None else self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RunnerError(self.deadline_reason) from exc
+                time.sleep(min(1, remaining))
+                continue
+            return {**observation, "nodes": nodes, "state": classify_ui(nodes)}
 
     def tap(self, node, label):
         x, y = _center(node)

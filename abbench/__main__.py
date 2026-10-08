@@ -2,6 +2,7 @@
 import argparse
 import csv
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -49,6 +50,7 @@ def main():
     p = sub.add_parser("doctor", help="只读能力快照；不自动确认计量能力")
     p.add_argument("--serial", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--timeout", type=float, default=12)
     p = sub.add_parser("boot", help="观察新启动；只有显式 --reboot 才请求设备重启")
     p.add_argument("--serial", required=True)
     p.add_argument("--out", required=True)
@@ -64,7 +66,45 @@ def main():
         p.add_argument("--run-dir", required=True)
         if command == "mark":
             p.add_argument("--event", required=True)
-    p.add_argument("--timeout", type=float, default=12)
+    p = sub.add_parser("idle", help="自动测量亮屏静置或熄屏待机并恢复屏幕策略")
+    p.add_argument("--serial", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--kind", choices=("screen_on_idle", "screen_off_standby"), required=True)
+    p.add_argument("--duration", type=int, required=True)
+    p.add_argument("--mode", choices=("native", "xhyper"), required=True)
+    p = sub.add_parser("geekbench", help="自动运行 CPU 或 GPU，导出本次新结果")
+    p.add_argument("--serial", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--kind", choices=("cpu", "gpu"), required=True)
+    p.add_argument("--mode", choices=("native", "xhyper"), required=True)
+    p.add_argument("--api", choices=("Vulkan", "OpenCL"), default="Vulkan")
+    p.add_argument("--expected-boot-id")
+    p = sub.add_parser("analyze-capture", help="分析本次导出的单启动 Perfetto 及设备单位证据")
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--processor", required=True)
+    p.add_argument("--profile", required=True)
+    p.add_argument("--start", type=float)
+    p.add_argument("--end", type=float)
+    for command in ("suite", "campaign"):
+        p = sub.add_parser(command, help="串行自动测试；campaign 调用镜像负责方交付的切换适配器")
+        p.add_argument("--serial", required=True)
+        p.add_argument("--out", required=True)
+        p.add_argument("--processor", required=True)
+        p.add_argument("--profile", required=True)
+        p.add_argument("--manifest")
+        p.add_argument("--options", help="测试时长、截止时间等 JSON 配置")
+        p.add_argument("--validation-only", action="store_true")
+        if command == "suite":
+            p.add_argument("--mode", choices=("native", "xhyper"), required=True)
+            p.add_argument("--reboot", action="store_true")
+        else:
+            p.add_argument("--adapter", required=True, help="JSON argv 数组文件；由镜像负责方提供可执行程序")
+            p.add_argument("--repetitions", type=int, default=1)
+    p = sub.add_parser("report", help="由指标行生成中文报告；验证数据必须加 --validation-only")
+    p.add_argument("--input", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--campaign")
+    p.add_argument("--validation-only", action="store_true")
     p = sub.add_parser("validate-manifest", help="核对镜像交付清单")
     p.add_argument("input")
     for name in ("compare", "endpoint"):
@@ -150,6 +190,47 @@ def main():
             result = mark_event(args.run_dir, args.event)
             emit(result)
             return 0
+        elif args.command == "idle":
+            from .idle import run_idle
+            result = run_idle(args.serial, args.out, kind=args.kind, duration_s=args.duration, mode=args.mode)
+            emit(result)
+            return 0 if result.get("valid") is True else 2
+        elif args.command == "geekbench":
+            from .geekbench_runner import run_geekbench
+            result = run_geekbench(args.serial, args.kind, args.out, mode=args.mode,
+                                   api=args.api, expected_boot_id=args.expected_boot_id)
+            emit(result)
+            return 0 if result.get("valid") is True else 2
+        elif args.command == "analyze-capture":
+            from .analysis import analyze_capture
+            result = analyze_capture(args.run_dir, args.processor, profile=read_json(args.profile),
+                                     start_s=args.start, end_s=args.end)
+            emit(result)
+            return 0 if result.get("valid") is True else 2
+        elif args.command in ("suite", "campaign"):
+            from .suite import run_suite, run_campaign
+            options = read_json(args.options) if args.options else {}
+            manifest = read_json(args.manifest) if args.manifest else None
+            profile = read_json(args.profile)
+            if args.command == "suite":
+                if args.reboot:
+                    options["reboot"] = True
+                result = run_suite(args.serial, args.out, args.mode, args.processor, profile,
+                                   validation_only=args.validation_only, manifest=manifest, options=options)
+            else:
+                result = run_campaign(args.serial, args.out, args.processor, profile,
+                                      manifest=manifest, adapter=read_json(args.adapter),
+                                      repetitions=args.repetitions, validation_only=args.validation_only, options=options)
+            emit(result)
+            return 0 if result.get("valid") is True else 2
+        elif args.command == "report":
+            from .report import create_report
+            campaign = read_json(args.campaign) if args.campaign else {}
+            if args.validation_only:
+                campaign["purpose"] = "validation"
+            result = create_report(read_json(args.input), args.out, campaign=campaign)
+            emit(result)
+            return 0
         else:
             from .power import endpoint
             data = read_json(args.input)
@@ -160,7 +241,7 @@ def main():
         if args.command == "export-geekbench" and result["counts"]["valid"] == 0:
             return 2
         return 2 if result.get("valid") is False else 0
-    except (ValueError, KeyError, OSError) as exc:
+    except (ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
         emit({"valid": False, "error": str(exc)})
         return 2
 
