@@ -1,4 +1,5 @@
 import copy
+import itertools
 import json
 from pathlib import Path
 import tempfile
@@ -83,14 +84,59 @@ class BindingTests(unittest.TestCase):
         with self.assertRaisesRegex(runner.RunnerError, "raw_api"):
             self.bind(rec, kind="gpu", api="Vulkan")
 
+    def test_software_gpu_is_rejected_and_hardware_identity_is_explicit(self):
+        for software in ("SwiftShader", "llvmpipe", "lavapipe", "software renderer", "software device"):
+            rec = record(kind="gpu")
+            rec["document"]["compute_device_name"] = "Mali-G57 r0p1"
+            rec["document"]["metrics"] = [{"value": "Vulkan1.3 " + software}]
+            with self.subTest(software=software), self.assertRaisesRegex(runner.RunnerError, "software_gpu"):
+                self.bind(rec, kind="gpu", api="Vulkan")
+        rec = record(kind="gpu")
+        rec["document"].update(compute_device_name="Mali-G57 r0p1", compute_platform_name="ARM ARM Platform",
+                               compute_driver_version="r54p1")
+        result = self.bind(rec, kind="gpu", api="Vulkan")
+        self.assertTrue(result["gpu_hardware_verified"])
+        self.assertEqual(result["gpu_identity"]["driver_fields"], {"compute_driver_version": "r54p1"})
+        rec["document"]["compute_device_name"] = "unknown device"
+        self.assertFalse(self.bind(rec, kind="gpu", api="Vulkan")["gpu_hardware_verified"])
+
 
 class UiTests(unittest.TestCase):
+    # Resource IDs, title, package and labels taken from saved CPU validation XML.
+    DIALOG = ('<hierarchy><node resource-id="android:id/parentPanel" package="com.primatelabs.geekbench6">'
+              '<node resource-id="android:id/alertTitle" text="Geekbench 6" package="com.primatelabs.geekbench6"/>'
+              '<node resource-id="android:id/message" text="Running Object Detection" package="com.primatelabs.geekbench6"/>'
+              '<node resource-id="android:id/progress_percent" text="27%" package="com.primatelabs.geekbench6"/>'
+              '<node resource-id="android:id/button2" text="CANCEL" enabled="true" package="com.primatelabs.geekbench6"/>'
+              '</node></hierarchy>')
+
+    def test_real_workload_dialog_is_computing_including_named_workloads(self):
+        for workload in ("Object Detection", "Asset Compression", "Horizon Detection", "GPU Benchmark"):
+            xml = self.DIALOG.replace("Object Detection", workload)
+            self.assertEqual(runner.classify_ui(runner.ui_nodes(xml)), "computing")
+        # A result page underneath the current dialog must not terminate the run.
+        xml = self.DIALOG.replace('</hierarchy>', '<node resource-id="com.primatelabs.geekbench6:id/resultsFrame"/></hierarchy>')
+        self.assertEqual(runner.classify_ui(runner.ui_nodes(xml)), "computing")
+
+    def test_running_text_and_confusing_dialogs_are_not_compute_evidence(self):
+        mutations = [self.DIALOG.replace("Geekbench 6", "Download Manager"),
+                     self.DIALOG.replace("com.primatelabs.geekbench6", "other.application"),
+                     self.DIALOG.replace("27%", "101%"),
+                     self.DIALOG.replace("android:id/progress_percent", "other:id/progress_percent"),
+                     self.DIALOG.replace('text="CANCEL"', 'text="OK"'),
+                     self.DIALOG.replace('enabled="true"', 'enabled="false"'),
+                     self.DIALOG.replace("Running Object Detection", "Loading Results"),
+                     '<hierarchy><node text="Running GPU Benchmark"/></hierarchy>']
+        for xml in mutations:
+            with self.subTest(xml=xml):
+                self.assertEqual(runner.classify_ui(runner.ui_nodes(xml)), "unknown")
+
     def test_resource_location_spinner_and_error_states(self):
         nodes = runner.ui_nodes('<hierarchy><node resource-id="com.primatelabs.geekbench6:id/computeApiSpinner" bounds="[10,20][80,60]" enabled="true"><node text="Vulkan"/></node><node resource-id="com.primatelabs.geekbench6:id/runComputeBenchmark" bounds="[10,90][100,150]"/></hierarchy>')
         self.assertEqual(runner.selected_api(nodes), "Vulkan")
         self.assertEqual(runner._center(runner.find_target(nodes, resource="runComputeBenchmark")), (55, 120))
         self.assertEqual(runner.classify_ui(nodes), "home")
-        for text, state in [("Running GPU Benchmark", "computing"), ("Uploading Results", "uploading"),
+        for text, state in [("Uploading Results", "uploading"),
                             ("Upload Failed", "upload_failed"), ("CPU Error", "benchmark_failed")]:
             self.assertEqual(runner.classify_ui(runner.ui_nodes('<hierarchy><node text="' + text + '"/></hierarchy>')), state)
         with self.assertRaisesRegex(runner.RunnerError, "ambiguous"):
@@ -160,8 +206,9 @@ class RunTests(unittest.TestCase):
 
     def run_fixture(self, **kwargs):
         out = Path(self.temp.name) / "run-1"
+        clock = kwargs.pop("clock", [0])
         with patch.object(runner, "_Device", FakeDevice), patch.object(runner.time, "sleep"), \
-             patch.object(runner.time, "monotonic", side_effect=kwargs.pop("clock", None)):
+             patch.object(runner.time, "monotonic", side_effect=itertools.chain(clock, itertools.repeat(clock[-1]))):
             # Provide a real finite clock for timeout controls when a sequence is requested.
             if "compute_timeout_s" not in kwargs:
                 kwargs["compute_timeout_s"] = 1200
@@ -204,6 +251,62 @@ class RunTests(unittest.TestCase):
             result = runner.run_geekbench("fixture-serial", "cpu", Path(directory) / "crossboot")
             self.assertFalse(result["valid"])
             self.assertEqual(result["reason"], "cross_boot_result")
+
+    def test_late_persisted_result_cannot_bypass_stage_deadline(self):
+        FakeDevice.query_sequence = [False, True]
+        FakeDevice.states = ["computing"]
+        # Start at zero. The first query is timely, the second completes at 3s.
+        class ClockDevice(FakeDevice):
+            clock = 0
+            query_count = 0
+
+            def new_document_id(self, baseline):
+                type(self).query_count += 1
+                type(self).clock = 1 if self.query_count == 1 else 3
+                return super().new_document_id(baseline)
+
+        with patch.object(runner, "_Device", ClockDevice), patch.object(runner.time, "sleep") as sleep, \
+             patch.object(runner.time, "monotonic", side_effect=lambda: ClockDevice.clock):
+            result = runner.run_geekbench("fixture", "cpu", Path(self.temp.name) / "late", compute_timeout_s=2)
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "compute_or_unobserved_persistence_timeout")
+        self.assertEqual(sleep.call_args.args, (1,))
+        self.assertIn("failure_snapshot", result)
+
+    def test_persistence_deadline_cannot_be_extended_by_poll_sleep(self):
+        class ClockDevice(FakeDevice):
+            states = ["uploading"]
+            query_sequence = [False, True]
+            clock = 0
+            query_count = 0
+
+            def new_document_id(self, baseline):
+                type(self).query_count += 1
+                type(self).clock = 1 if self.query_count == 1 else 5
+                return super().new_document_id(baseline)
+
+        with patch.object(runner, "_Device", ClockDevice), patch.object(runner.time, "sleep") as sleep, \
+             patch.object(runner.time, "monotonic", side_effect=lambda: ClockDevice.clock):
+            result = runner.run_geekbench("fixture", "cpu", Path(self.temp.name) / "late-persist", persist_timeout_s=2)
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "persistence_timeout_after_compute")
+        self.assertEqual(sleep.call_args.args, (2,))
+
+    def test_each_adb_call_uses_remaining_budget_and_late_stdout_is_preserved(self):
+        import subprocess
+        for ended, expected_error in [(9, False), (11, True)]:
+            with tempfile.TemporaryDirectory() as directory:
+                device = runner._Device("fixture", directory, 20)
+                device.deadline, device.deadline_reason = 10, "compute_timeout"
+                with patch.object(runner.time, "monotonic", side_effect=[5, ended]), \
+                     patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "late-result-json", "")) as command:
+                    if expected_error:
+                        with self.assertRaisesRegex(runner.RunnerError, "compute_timeout"):
+                            device.shell("true", "budget")
+                    else:
+                        self.assertEqual(device.shell("true", "budget"), "late-result-json")
+                self.assertEqual(command.call_args.kwargs["timeout"], 5)
+                self.assertEqual((Path(directory) / "commands/0001-budget.stdout.txt").read_text(), "late-result-json")
 
 
 if __name__ == "__main__":

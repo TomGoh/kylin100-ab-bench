@@ -76,6 +76,29 @@ def selected_api(nodes):
     return values.pop()
 
 
+def _computing_dialog(nodes):
+    """识别本版实际工作负载弹窗，不能凭任意 Running 文本判定计算。"""
+    for panel in nodes:
+        if panel.get("resource-id") != "android:id/parentPanel" or panel.get("package") != PACKAGE:
+            continue
+        fields = {}
+        for node in panel.iter("node"):
+            if node.get("package") == PACKAGE:
+                fields.setdefault(node.get("resource-id"), []).append(node)
+        required = ("alertTitle", "message", "progress_percent", "button2")
+        if any(len(fields.get("android:id/" + name, [])) != 1 for name in required):
+            continue
+        title, message, percentage, cancel = (fields["android:id/" + name][0] for name in required)
+        percent_text = percentage.get("text", "").strip()
+        if (title.get("text", "").strip() == "Geekbench 6"
+                and re.fullmatch(r"Running\s+\S[^\n]*", message.get("text", "").strip())
+                and re.fullmatch(r"(?:100|[1-9]?\d)%", percent_text)
+                and cancel.get("text", "").strip().casefold() == "cancel"
+                and cancel.get("enabled") != "false"):
+            return True
+    return False
+
+
 def classify_ui(nodes):
     texts = [node.get("text", "").strip() for node in nodes]
     joined = "\n".join(texts)
@@ -85,11 +108,13 @@ def classify_ui(nodes):
         return "benchmark_failed"
     if re.search(r"uploading|正在上传|上传结果", joined, re.I):
         return "uploading"
+    if _computing_dialog(nodes):
+        return "computing"
     resources = {node.get("resource-id", "").split(":id/")[-1] for node in nodes}
     if "benchmarkWebView" in resources or "resultsFrame" in resources or re.search(r"(?:Vulkan|OpenCL|Single.Core|Multi.Core) Score", joined, re.I):
         return "result"
-    if re.search(r"running.{0,30}benchmark|正在运行|正在测试", joined, re.I) or any(
-            resource in resources for resource in ("progress_current_workload", "progress_progress")):
+    if any(node.get("package") == PACKAGE and node.get("resource-id") in
+           (PACKAGE + ":id/progress_current_workload", PACKAGE + ":id/progress_progress") for node in nodes):
         return "computing"
     if "runCpuBenchmarks" in resources or "runComputeBenchmark" in resources:
         return "home"
@@ -103,6 +128,28 @@ def _document_api(document):
     found = {api for api in ("Vulkan", "OpenCL") if any(
         isinstance(value, str) and re.search(r"\b" + api + r"\b", value) for value in values)}
     return next(iter(found)) if len(found) == 1 else None
+
+
+def _gpu_identity(document):
+    """保留结果的设备/驱动身份；明确软件实现不可计作硬件 GPU。"""
+    name = document.get("compute_device_name")
+    platform = document.get("compute_platform_name")
+    drivers = {key: value for key, value in document.items() if "driver" in key.lower()}
+    metrics = document.get("metrics", [])
+    if not isinstance(metrics, list):
+        raise RunnerError("gpu_metrics_schema_invalid")
+    metric_texts = [item.get("value", "") for item in metrics if isinstance(item, dict)]
+    texts = [name, platform, *drivers.values(), *metric_texts]
+    if any(isinstance(value, str) and re.search(
+            r"swiftshader|llvmpipe|lavapipe|software\s+(?:renderer|device|rasterizer)", value, re.I)
+           for value in texts):
+        raise RunnerError("software_gpu_result_not_hardware")
+    # This GPU family is supported by this tablet's saved result evidence. A
+    # driver API string alone does not establish a hardware device identity.
+    known_hardware = isinstance(name, str) and bool(re.match(r"^Mali[- ](?:G\d+|T\d+)\b", name, re.I))
+    return {"device_name": name, "platform_name": platform, "driver_fields": drivers,
+            "gpu_hardware_verified": known_hardware,
+            "hardware_evidence": "result_compute_device_name_Mali_family" if known_hardware else None}
 
 
 def bind_result(before, after, *, kind, expected_version, boot_id, end_boot_id,
@@ -127,15 +174,18 @@ def bind_result(before, after, *, kind, expected_version, boot_id, end_boot_id,
     version = str(record.get("version", "")).removeprefix("Geekbench ").strip()
     if version != expected_version:
         raise RunnerError("new_result_version_mismatch")
-    evidence = None
+    evidence, gpu_identity = None, None
     if kind == "gpu":
         document = record["document"]
+        gpu_identity = _gpu_identity(document)
         if document.get("compute_api") != record.get("api_raw"):
             raise RunnerError("gpu_raw_api_mismatch")
         evidence = _document_api(document)
         if evidence != api:
             raise RunnerError("gpu_api_result_mismatch_or_unverified")
     return {**record, "api_name_verified": evidence, "boot_id": boot_id,
+            "gpu_identity": gpu_identity,
+            "gpu_hardware_verified": gpu_identity["gpu_hardware_verified"] if gpu_identity else None,
             "binding": "new_document_id_and_uuid_after_baseline", "previous_document_id": high_water}
 
 
@@ -146,6 +196,8 @@ class _Device:
         self.index = 0
         self.remote = "/data/local/tmp/abbench-gb6-" + uuid.uuid4().hex
         self.sqlite_available = None
+        self.deadline = None
+        self.deadline_reason = "benchmark_stage_timeout"
         (self.out / "commands").mkdir()
 
     def shell(self, command, label):
@@ -153,8 +205,14 @@ class _Device:
         prefix = self.out / "commands" / f"{self.index:04d}-{label}"
         args = ["adb", "-s", self.serial, "shell", "su", "0", "sh", "-c", shlex.quote(command)]
         started = time.monotonic()
+        timeout = self.timeout
+        if self.deadline is not None:
+            remaining = self.deadline - started
+            if remaining <= 0:
+                raise RunnerError(self.deadline_reason)
+            timeout = min(timeout, remaining)
         try:
-            proc = subprocess.run(args, capture_output=True, text=True, timeout=self.timeout)
+            proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
             stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout or b""
@@ -164,8 +222,11 @@ class _Device:
             returncode = None
         prefix.with_suffix(".stdout.txt").write_text(stdout, encoding="utf-8")
         prefix.with_suffix(".stderr.txt").write_text(stderr, encoding="utf-8")
+        ended = time.monotonic()
         _write(prefix.with_suffix(".json"), {"command": command, "returncode": returncode,
-                                            "host_duration_s": time.monotonic() - started})
+                                            "timeout_s": timeout, "host_duration_s": ended - started})
+        if self.deadline is not None and ended >= self.deadline:
+            raise RunnerError(self.deadline_reason)
         if returncode != 0:
             raise RunnerError(f"device_command_failed:{label}:{returncode}:{stderr.strip()}")
         return stdout.replace("\r\n", "\n")
@@ -361,9 +422,25 @@ def run_geekbench(serial, kind, out, *, mode=None, api="Vulkan", expected_app_ve
         previous_computing = None
         latest_ui = None
         persisted = False
+
+        def remaining_budget():
+            if persistence_started is None:
+                deadline = start_host + compute_timeout_s
+                reason = "compute_or_unobserved_persistence_timeout"
+            else:
+                deadline = persistence_started + persist_timeout_s
+                reason = "persistence_timeout_after_compute"
+            device.deadline, device.deadline_reason = deadline, reason
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RunnerError(reason)
+            return remaining
+
         while True:
+            remaining_budget()
             # Read a scalar ID first, then only its candidate JSON; never copy a live DB.
             query = device.new_document_id(baseline)
+            remaining_budget()
             if query and query["boot_id"] != result["boot_id"]:
                 raise RunnerError("cross_boot_observation")
             if query and query["new"]:
@@ -374,8 +451,10 @@ def run_geekbench(serial, kind, out, *, mode=None, api="Vulkan", expected_app_ve
             try:
                 observation = device.observe("poll-ui")
             except RunnerError as exc:
+                remaining_budget()
                 result["events"].append({"state": "ui_unavailable", "reason": str(exc)})
                 observation = None
+            remaining_budget()
             if observation:
                 if observation["boot_id"] != result["boot_id"]:
                     raise RunnerError("cross_boot_observation")
@@ -400,17 +479,14 @@ def run_geekbench(serial, kind, out, *, mode=None, api="Vulkan", expected_app_ve
                         raise RunnerError("upload_failed_result_not_saved")
                     if state == "result" and not device.sqlite_available:
                         # Only this app is stopped; the final DB must still prove a new complete result.
-                        time.sleep(2)
+                        time.sleep(min(2, remaining_budget()))
+                        remaining_budget()
                         persisted = True
                         result["persistence_candidate"] = "result_ui_after_compute; final_database_must_confirm"
                         break
-            now = time.monotonic()
-            if persistence_started is not None and now - persistence_started >= persist_timeout_s:
-                raise RunnerError("persistence_timeout_after_compute")
-            if persistence_started is None and now - start_host >= compute_timeout_s:
-                raise RunnerError("compute_or_unobserved_persistence_timeout")
-            time.sleep(poll_interval_s)
+            time.sleep(min(poll_interval_s, remaining_budget()))
 
+        device.deadline = None
         after, proof = device.snapshot("history-after", allow_stop=persisted)
         result["final_snapshot"] = proof
         end = device.identity()
@@ -419,6 +495,7 @@ def run_geekbench(serial, kind, out, *, mode=None, api="Vulkan", expected_app_ve
                             result_ui=latest_ui, seen_uuids=seen_uuids)
         result.update(valid=True, result_uuid=bound["uuid"], document_id=bound["document_id"],
                       result=bound, end_boottime_s=end["after_s"],
+                      gpu_hardware_verified=bound["gpu_hardware_verified"],
                       internal_runtime_s=bound["document"].get("runtime"))
         if not result["compute_complete_observed"]:
             result["compute_complete_window"] = None
@@ -427,6 +504,12 @@ def run_geekbench(serial, kind, out, *, mode=None, api="Vulkan", expected_app_ve
         save_event("validated", end)
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         result.update(valid=False, state="failed", reason=str(exc), error_type=type(exc).__name__)
+        device.deadline = None
+        if "timeout" in str(exc) and device.sqlite_available:
+            try:
+                _, result["failure_snapshot"] = device.snapshot("history-on-failure", allow_stop=False)
+            except (ValueError, OSError, subprocess.SubprocessError) as snapshot_error:
+                result["failure_snapshot_error"] = str(snapshot_error)
         device.failure_evidence()
         _write(target / "failure.json", {"valid": False, "reason": str(exc), "error_type": type(exc).__name__})
         _write(target / "run.json", result)
