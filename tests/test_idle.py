@@ -219,6 +219,9 @@ class IdleWindowTests(unittest.TestCase):
         self.assertIsNone(parse_screen_state("mWakefulness=Asleep", actual_format))
         self.assertIsNone(parse_screen_state("mWakefulness=Awake", actual_format.replace("committedState ON", "committedState OFF")))
         self.assertIsNone(parse_screen_state("mWakefulness=Awake", actual_format + "\n" + actual_format))
+        off = actual_format.replace('state ON', 'state OFF').replace('committedState ON', 'committedState OFF')
+        self.assertEqual(parse_screen_state('mWakefulness=Dozing', off), 'off')
+        self.assertIsNone(parse_screen_state('mWakefulness=Dozing', off.replace('state OFF', 'state DOZE').replace('committedState OFF', 'committedState DOZE')))
         self.assertEqual(parse_suspend_stats("success: 3\ntotal suspend time: 42 ms\n"),
                          {"success": 3, "total_suspend_ms": 42})
         self.assertIsNone(parse_suspend_stats("total suspend time: 3 s")["total_suspend_ms"])

@@ -27,7 +27,9 @@ def parse_screen_state(raw, display_raw=None):
             display = set(re.findall(r"\b(?:state|committedState) (ON|OFF|DOZE|DOZE_SUSPEND)\b", default_lines[0]))
     if wake == {"Awake"} and display == {"ON"}:
         return "on"
-    if wake == {"Asleep"} and display == {"OFF"}:
+    # This tablet enters Dozing with the physical display fully OFF. System
+    # suspend is verified separately; DOZE display states remain ineligible.
+    if wake in ({"Asleep"}, {"Dozing"}) and display == {"OFF"}:
         return "off"
     return None
 
