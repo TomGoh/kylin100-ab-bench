@@ -20,6 +20,27 @@
   "current_sign_reference": "Android BatteryManager CURRENT_NOW 微安正充电负放电定义及本机单线程负载短测。",
   "counter_validated": false,
   "input_supply_verified_off": false,
+  "supply_inventory_sha256": "7815b686be1178dbbb039f35f67a0a83b0d5d0ca34c39a89bee2b07250d42bb7",
+  "auxiliary_supply_paths": [
+    {
+      "path": "/sys/class/power_supply/sc27xx-fgu",
+      "type": "Unknown",
+      "role": "battery_gauge",
+      "evidence_reference": "docs/MAC-WIRELESS.md: 2026-10-08 实机驱动 sprd-fgu 与电池电流、电压、电量属性；软件接口分类，不证明硬件输入隔离。"
+    },
+    {
+      "path": "/sys/class/power_supply/sc27xx_fast_charger",
+      "type": "Unknown",
+      "role": "charger_aux",
+      "evidence_reference": "docs/MAC-WIRELESS.md: 2026-10-08 实机仅暴露 charge_type 与 voltage_max；软件充电辅助接口分类，须物理拔除所有充电输入。"
+    },
+    {
+      "path": "/sys/class/power_supply/sprd_bcl",
+      "type": "Unknown",
+      "role": "battery_limit",
+      "evidence_reference": "docs/MAC-WIRELESS.md: 2026-10-08 实机 sprd_bcl 仅暴露 temp；软件接口分类，不证明硬件输入隔离。"
+    }
+  ],
   "input_suspend_control": null,
   "preferred_active_telemetry": "perfetto_android_power_linux_sys_stats",
   "perfetto_device_version_from_preflight": "51.2",

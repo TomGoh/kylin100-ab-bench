@@ -85,13 +85,15 @@ class DeviceSimulation:
 
 
 class IdleWindowTests(unittest.TestCase):
-    def collect(self, simulation, **kwargs):
+    def collect(self, simulation, supply_observations=None, **kwargs):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary) / "window"
             with patch("abbench.idle.time.monotonic", simulation.monotonic), \
                  patch("abbench.idle.time.sleep", simulation.sleep), \
                  patch("abbench.idle.subprocess.run", simulation.run), \
                  patch("abbench.idle._mark_event", return_value={"t_s": 123, "boot_id": BOOT}), \
+                 patch("abbench.idle._read_supply", side_effect=supply_observations,
+                       return_value={"valid": False, "reason": "not_observed"}), \
                  patch("abbench.idle._start_capture", return_value={"state": "active"}) as start, \
                  patch("abbench.idle._stop_capture", return_value={"state": "exported"}) as stop:
                 result = run_idle("test-device", directory, duration_s=10, **kwargs)
@@ -159,6 +161,35 @@ class IdleWindowTests(unittest.TestCase):
         config = {"units_validated": True, "counter_validated": True,
                   "power_boundary": "battery_side_device", "input_supply_verified_off": True}
         result, _, _, _ = self.collect(DeviceSimulation(), power_config=config)
+        self.assertFalse(result["power"]["valid"])
+        self.assertEqual(result["power"]["reason"], "external_supply_unknown")
+
+    def test_counter_endpoints_require_actual_bracketing_supply_evidence(self):
+        def supply(t, usb):
+            return {"raw": f"ABSUPPLY\t1\nBEGIN\t{BOOT}\ttest-device\t{t}\n"
+                    "NODE\t/sys/class/power_supply/battery\tBattery\t1\t1\n"
+                    f"NODE\t/sys/class/power_supply/usb\tUSB\t{usb}\t?\n"
+                    "DUMP_BEGIN\nCurrent Battery Service state:\n"
+                    "  AC powered: false\n  USB powered: false\n"
+                    "  Wireless powered: false\n  Dock powered: false\nDUMP_END\n"
+                    f"END\t{BOOT}\ttest-device\t{t+0.1}\n"}
+        config = {"serial": "test-device", "units_validated": True, "counter_validated": True,
+                  "counter_resolution_uah": 1, "power_boundary": "battery_side_device"}
+        for usb, expected in ((0, True), (1, False)):
+            with self.subTest(usb=usb):
+                result, _, _, _ = self.collect(DeviceSimulation(), kind="screen_off_standby", power_config=config,
+                                               supply_observations=[supply(90, 0), supply(300, usb)])
+                self.assertEqual(result["supply_evidence"]["verified_off"], expected)
+                self.assertEqual(result["power"]["valid"], expected)
+                if expected:
+                    self.assertEqual(result["power"]["power_boundary"], "battery_side_device")
+                    self.assertAlmostEqual(result["power"]["energy_j"], 0.144)
+
+    def test_static_external_off_flags_cannot_bypass_missing_evidence(self):
+        config = {"serial": "test-device", "units_validated": True, "counter_validated": True,
+                  "power_boundary": "battery_side_device", "input_supply_verified_off": True,
+                  "external_online_verified": False, "counter_resolution_uah": 1}
+        result, _, _, _ = self.collect(DeviceSimulation(), kind="screen_off_standby", power_config=config)
         self.assertFalse(result["power"]["valid"])
         self.assertEqual(result["power"]["reason"], "external_supply_unknown")
 

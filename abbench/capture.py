@@ -35,21 +35,42 @@ def shell(serial, command, timeout=12):
 
 def clock_probe(serial):
     before = time.monotonic()
-    proc = shell(serial, "cat /proc/sys/kernel/random/boot_id; cat /proc/uptime; cat /proc/sys/kernel/random/boot_id")
+    proc = shell(serial, "getprop ro.serialno; cat /proc/sys/kernel/random/boot_id; cat /proc/uptime; cat /proc/sys/kernel/random/boot_id; getprop ro.serialno")
     after = time.monotonic()
     lines = proc.stdout.strip().splitlines()
-    if len(lines) != 3 or lines[0] != lines[2]:
+    if len(lines) != 5 or lines[1] != lines[3]:
         raise ValueError("device restarted or returned an incomplete clock probe")
+    physical_serial = lines[0]
+    if (physical_serial != lines[4] or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", physical_serial)
+            or physical_serial.lower() in ("unknown", "null", "none", "0")):
+        raise ValueError("physical device serial is missing, invalid or changed")
     try:
-        uuid.UUID(lines[0])
-        boottime = float(lines[1].split()[0])
+        uuid.UUID(lines[1])
+        boottime = float(lines[2].split()[0])
     except (ValueError, IndexError) as exc:
         raise ValueError("invalid device identity or uptime") from exc
     if not math.isfinite(boottime) or boottime < 0:
         raise ValueError("invalid device boottime")
-    return {"boot_id": lines[0], "t_s": boottime, "raw": proc.stdout,
+    return {"boot_id": lines[1], "t_s": boottime, "raw": proc.stdout,
+            "transport_serial": serial, "physical_serial": physical_serial,
+            "physical_serial_source": "ro.serialno",
             "host_before_monotonic_s": before, "host_after_monotonic_s": after,
             "clock": "proc_uptime_boottime", "measurement_validated": False}
+
+
+def _same_device(before, after):
+    return (before.get("boot_id") == after.get("boot_id") and
+            bool(before.get("physical_serial")) and
+            before["physical_serial"] == after.get("physical_serial"))
+
+
+def _read_supply(serial):
+    """Keep unavailable supply evidence without turning it into a power claim."""
+    try:
+        from .supply import read_supply
+        return read_supply(serial)
+    except (ImportError, ValueError, OSError, subprocess.SubprocessError) as exc:
+        return {"valid": False, "reason": "supply_evidence_unavailable:" + str(exc)}
 
 
 def _process_identity(serial, remote, pid):
@@ -68,14 +89,16 @@ def _process_identity(serial, remote, pid):
     return {"starttime_ticks": starttime, "executable": executable, "raw": proc.stdout}
 
 
-def _signal_owned_session(serial, remote, pid, boot_id, process):
+def _signal_owned_session(serial, remote, pid, boot_id, process, physical_serial=None):
     if not re.fullmatch(r"/data/local/tmp/abbench-[a-f0-9]{32}", remote) or type(pid) is not int or pid <= 0:
         raise ValueError("invalid capture process identity")
     uuid.UUID(boot_id)
     starttime, executable = process["starttime_ticks"], process["executable"]
     if type(starttime) is not int or starttime < 0 or Path(executable).name != "perfetto":
         raise ValueError("invalid saved Perfetto identity")
-    command = (f"[ \"$(cat /proc/sys/kernel/random/boot_id)\" = {boot_id} ] || exit 8; "
+    physical_guard = ("[ \"$(getprop ro.serialno)\" = " + shlex.quote(physical_serial) + " ] || exit 9; "
+                      if physical_serial is not None else "")
+    command = (physical_guard + f"[ \"$(cat /proc/sys/kernel/random/boot_id)\" = {boot_id} ] || exit 8; "
                f"if [ -r /proc/{pid}/cmdline ]; then "
                f"stat=$(cat /proc/{pid}/stat) || exit 7; rest=${{stat##*) }}; set -- $rest; "
                f"[ $# -ge 20 ] || exit 7; shift 19; "
@@ -95,13 +118,16 @@ def start_capture(serial, directory, duration_s=900, mode="unknown", config_path
     target.mkdir(parents=True, exist_ok=False)
     session = uuid.uuid4().hex
     remote = "/data/local/tmp/abbench-" + session
-    result = {"serial": serial, "mode_label": mode, "mode_verified": False,
+    result = {"serial": serial, "transport_serial": serial, "physical_serial": None,
+              "mode_label": mode, "mode_verified": False,
               "session_id": session, "remote_dir": remote, "duration_limit_s": duration_s,
               "created_utc": datetime.now(timezone.utc).isoformat(), "state": "preparing",
               "measurement_validated": False, "power_boundary": "battery_net"}
     write_json(target / "capture.json", result)
     try:
+        result["supply_before"] = _read_supply(serial)
         result["before"] = clock_probe(serial)
+        result["physical_serial"] = result["before"]["physical_serial"]
         source = Path(config_path) if config_path else Path(__file__).resolve().parents[1] / "configs/perfetto-power-memory.pbtxt"
         config, count = re.subn(r"(?m)^\s*duration_ms:\s*\d+\s*$", "duration_ms: " + str(duration_s * 1000), source.read_text())
         if count != 1:
@@ -120,8 +146,8 @@ def start_capture(serial, directory, duration_s=900, mode="unknown", config_path
         result["pid"] = int(pids[0])
         result["process"] = _process_identity(serial, remote, result["pid"])
         result["armed"] = clock_probe(serial)
-        if result["armed"]["boot_id"] != result["before"]["boot_id"]:
-            raise ValueError("device restarted while starting telemetry")
+        if not _same_device(result["before"], result["armed"]):
+            raise ValueError("device identity changed while starting telemetry")
         result["state"] = "active"
         write_json(target / "capture.json", result)
         return result
@@ -136,7 +162,7 @@ def start_capture(serial, directory, duration_s=900, mode="unknown", config_path
             (target / ("failure." + field + ".txt")).write_text(value)
         if "pid" in result and "before" in result and "process" in result:
             try:
-                cleanup = _signal_owned_session(serial, remote, result["pid"], result["before"]["boot_id"], result["process"])
+                cleanup = _signal_owned_session(serial, remote, result["pid"], result["before"]["boot_id"], result["process"], result["physical_serial"])
                 result["cleanup"] = {"requested": True, "stdout": cleanup.stdout, "stderr": cleanup.stderr}
             except (ValueError, OSError, subprocess.SubprocessError) as cleanup_error:
                 result["cleanup"] = {"requested": False, "error": str(cleanup_error)}
@@ -155,8 +181,8 @@ def mark_event(directory, event):
     if capture["state"] != "active":
         raise ValueError("events require an active capture")
     probe = clock_probe(capture["serial"])
-    if probe["boot_id"] != capture["before"]["boot_id"]:
-        raise ValueError("event belongs to another boot")
+    if not _same_device(capture["before"], probe):
+        raise ValueError("event belongs to another device or boot")
     result = {"event": event, **probe}
     # One suite owns each run. O_APPEND preserves existing observations.
     with (target / "events.jsonl").open("a", encoding="utf-8") as stream:
@@ -175,11 +201,11 @@ def stop_capture(directory):
     serial = result["serial"]
     try:
         result["stop_requested"] = clock_probe(serial)
-        if result["stop_requested"]["boot_id"] != result["before"]["boot_id"]:
-            raise ValueError("device restarted during capture")
+        if not _same_device(result["before"], result["stop_requested"]):
+            raise ValueError("device identity changed during capture")
         # A PID can be reused after the finite duration expires. Only signal the
         # process whose command line still names this private session directory.
-        proc = _signal_owned_session(serial, remote, pid, result["before"]["boot_id"], result["process"])
+        proc = _signal_owned_session(serial, remote, pid, result["before"]["boot_id"], result["process"], result["before"]["physical_serial"])
         (target / "stop.stdout.txt").write_text(proc.stdout)
         (target / "stop.stderr.txt").write_text(proc.stderr)
         deadline = time.monotonic() + 15
@@ -195,8 +221,9 @@ def stop_capture(directory):
         if not trace.is_file() or trace.stat().st_size == 0:
             raise ValueError("capture has no trace; never substitute zero telemetry")
         result["after"] = clock_probe(serial)
-        if result["after"]["boot_id"] != result["before"]["boot_id"]:
-            raise ValueError("device restarted during trace export")
+        if not _same_device(result["before"], result["after"]):
+            raise ValueError("device identity changed during trace export")
+        result["supply_after"] = _read_supply(serial)
         result.update(state="exported", trace=str(trace.resolve()))
         write_json(target / "capture.json", result)
         return result

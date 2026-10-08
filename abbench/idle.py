@@ -56,6 +56,11 @@ def _mark_event(*args, **kwargs):
     return mark_event(*args, **kwargs)
 
 
+def _read_supply(serial):
+    from .capture import _read_supply as read
+    return read(serial)
+
+
 def _decode(raw):
     return raw.decode(errors="replace") if isinstance(raw, bytes) else raw or ""
 
@@ -249,6 +254,8 @@ def run_idle(serial, directory, kind="screen_on_idle", duration_s=None, mode="un
             device.shell("screen-sleep", "input keyevent 223")
         result["screen_start"] = device.screen("on" if kind == "screen_on_idle" else "off")
         result["suspend_before"] = device.suspend("suspend-before")
+        if power_config is not None:
+            result["supply_before"] = _read_supply(serial)
         result["start"] = device.endpoint("endpoint-start", battery_path, usb_online_path)
         if result["start"]["boot_id"] != result["boot_id"]:
             raise ValueError("device_restarted_before_window")
@@ -274,6 +281,8 @@ def run_idle(serial, directory, kind="screen_on_idle", duration_s=None, mode="un
                                        "host_first_end_query_s": result["screen_end"]["host_before_s"],
                                        "included_in_endpoint_window": True}
         result["end"] = device.endpoint("endpoint-end", battery_path, usb_online_path)
+        if power_config is not None:
+            result["supply_after"] = _read_supply(serial)
         if result["wake_overhead"] is not None:
             wake = result["wake_overhead"]
             wake["host_first_end_query_to_endpoint_return_s"] = (
@@ -308,16 +317,26 @@ def run_idle(serial, directory, kind="screen_on_idle", duration_s=None, mode="un
                                                "suspend_stats_decreased" if not delta["valid"] else
                                                "no_verified_successful_suspend")
         if power_config is not None:
+            from .supply import verify_supply_window
+            supply_profile = power_config if isinstance(power_config, dict) else {}
+            qualification = verify_supply_window(result.get("supply_before"), result.get("supply_after"),
+                boot_id=result["boot_id"], physical_serial=supply_profile.get("serial"),
+                start_s=start["read_begin_s"], end_s=end["read_end_s"], profile=supply_profile)
+            result["supply_evidence"] = qualification
             if not isinstance(power_config, dict) or power_config.get("units_validated") is not True or power_config.get("counter_validated") is not True:
                 result["power"]["reason"] = "units_or_counter_not_validated"
+            elif power_config.get("power_boundary") == "battery_side_device" and not qualification["verified_off"]:
+                result["power"]["reason"] = "external_supply_unknown"
             else:
                 from .power import endpoint
+                config = {**power_config, "power_boundary": "battery_side_device" if qualification["verified_off"] else "battery_net",
+                          "input_supply_verified_off": qualification["verified_off"]}
                 def validated(sample):
                     return {"boot_id": sample["boot_id"], "t_s": sample["read_begin_s"],
                             "voltage_uv": sample["voltage_uv_candidate"],
                             "charge_uah": sample["charge_uah_candidate"],
-                            "external_online": power_config.get("external_online_verified")}
-                result["power"] = endpoint(validated(start), validated(end), power_config)
+                            "external_online": False if qualification["verified_off"] else None}
+                result["power"] = endpoint(validated(start), validated(end), config)
         result["valid"] = True
     except (ValueError, OSError, subprocess.SubprocessError, KeyboardInterrupt) as exc:
         result["reason"] = "interrupted" if isinstance(exc, KeyboardInterrupt) else str(exc)

@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from abbench.analysis import analyze_capture, memory_counters, verified_boottime
+from test_supply import raw as supply_raw
+from abbench.supply import parse_supply_output
 
 
 class AnalysisTests(unittest.TestCase):
@@ -108,6 +110,47 @@ class CaptureAnalysisTests(unittest.TestCase):
             normalized_file = target / "analysis/normalized-battery.json"
             normalized = json.loads(normalized_file.read_text()) if normalized_file.is_file() else None
             return result, normalized
+
+    def test_auxiliary_roles_are_bound_in_analysis_without_ignoring_online_sources(self):
+        extra="NODE\t/sys/class/power_supply/gauge\tUnknown\t?\t1\n"
+        capture=copy.deepcopy(self.capture)
+        capture.update(physical_serial="test-tablet",supply_before={"raw":supply_raw(extra=extra)},
+                       supply_after={"raw":supply_raw(121,122,extra=extra)})
+        profile=dict(self.profile,supply_inventory_sha256=parse_supply_output(capture["supply_before"]["raw"])["supply_inventory_sha256"],
+                     auxiliary_supply_paths=[{"path":"/sys/class/power_supply/gauge","type":"Unknown",
+                                              "role":"battery_gauge","evidence_reference":"role-properties.txt"}])
+        result,_=self.analyze(capture=capture,profile=profile)
+        self.assertEqual(result["power"]["power_boundary"],"battery_side_device")
+        self.assertEqual(result["power"]["energy_j"],20)
+        result,_=self.analyze(capture=capture)
+        self.assertEqual(result["power"]["power_boundary"],"battery_net")
+        self.assertEqual(result["supply_evidence"]["reason"],"external_supply_state_unknown")
+
+    def test_verified_supply_and_physical_identity_allow_known_device_energy(self):
+        capture=copy.deepcopy(self.capture)
+        capture.update(serial="192.0.2.1:5555",physical_serial="test-tablet",
+                       supply_before={"raw":supply_raw()},supply_after={"raw":supply_raw(121,122)})
+        result,normalized=self.analyze(capture=capture)
+        self.assertTrue(result["power"]["valid"])
+        self.assertEqual(result["power"]["power_boundary"],"battery_side_device")
+        self.assertEqual(result["power"]["energy_j"],20)
+        self.assertTrue(all(s["external_online"] is False for s in normalized["samples"]))
+        self.assertFalse(result["power"]["sensor_calibrated"])
+
+    def test_static_isolation_flags_wifi_and_bad_evidence_do_not_upgrade(self):
+        capture=copy.deepcopy(self.capture)
+        capture.update(serial="192.0.2.1:5555",physical_serial="test-tablet")
+        profile=dict(self.profile,input_supply_verified_off=True)
+        for pre,post in [(None,None),({"raw":supply_raw(usb="1")},{"raw":supply_raw(121,122)}),
+                         ({"raw":supply_raw()},{"raw":supply_raw(119,122)}),
+                         ({"raw":supply_raw()},{"raw":supply_raw(121,122,boot="22222222-2222-4222-8222-222222222222")})]:
+            capture.update(supply_before=pre,supply_after=post)
+            result,_=self.analyze(capture=capture,profile=profile)
+            self.assertTrue(result["power"]["valid"])
+            self.assertEqual(result["power"]["power_boundary"],"battery_net")
+        capture["physical_serial"]="other-tablet"
+        result,_=self.analyze(capture=capture)
+        self.assertEqual(result["power"]["reason"],"source_profile_serial_mismatch")
 
     def test_complete_source_has_known_twenty_joules_and_sampled_memory(self):
         result, normalized = self.analyze()

@@ -51,6 +51,10 @@ def main():
     p.add_argument("--serial", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--timeout", type=float, default=12)
+    p = sub.add_parser("supply", help="只读核对物理设备及全部外部供电状态；不自动确认传感器精度")
+    p.add_argument("--serial", required=True)
+    p.add_argument("--profile", required=True)
+    p.add_argument("--out", required=True)
     p = sub.add_parser("boot", help="观察新启动；只有显式 --reboot 才请求设备重启")
     p.add_argument("--serial", required=True)
     p.add_argument("--out", required=True)
@@ -139,6 +143,23 @@ def main():
             result = snapshot(args.serial, args.out, args.timeout)
             emit(result)
             return 0 if result["acquisition_complete"] else 2
+        if args.command == "supply":
+            from .supply import read_supply, verify_supply_snapshot
+            if Path(args.out).exists():
+                raise ValueError("supply output already exists; choose a new evidence file")
+            profile = read_json(args.profile)
+            expected = profile.get("serial")
+            if not isinstance(expected, str) or not expected.strip():
+                raise ValueError("profile must identify the physical serial")
+            evidence = read_supply(args.serial)
+            qualification = verify_supply_snapshot(evidence, physical_serial=expected, profile=profile)
+            result = {"valid": qualification.get("verified_off") is True,
+                      "physical_serial_expected": expected, "transport_serial": args.serial,
+                      "supply": evidence, "qualification": qualification,
+                      "sensor_calibrated": False,
+                      "note": "仅核对本次观察时的外部供电；计量窗口须实际保持拔线并核对前后证据。"}
+            emit(result, args.out)
+            return 0 if result["valid"] else 2
         if args.command == "validate-manifest":
             from .manifest import validate_manifest
             result = validate_manifest(read_json(args.input))

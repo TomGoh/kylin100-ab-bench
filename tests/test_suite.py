@@ -165,6 +165,27 @@ class SuiteTests(unittest.TestCase):
         self.assertFalse(result["valid"])
         self.assertFalse(any(module not in ("report",) for module, *_ in backend.calls))
 
+    def test_wireless_profile_rejects_a_different_physical_board_before_reboot(self):
+        backend = Backend()
+        with patch.object(suite, "_call", side_effect=backend.call):
+            result = suite.run_suite("192.0.2.8:5555", Path(self.temp.name) / "wrong-board", "xhyper", "tp",
+                                     {**PROFILE, "serial": "expected-board"}, validation_only=True,
+                                     options={"reboot": True})
+        self.assertFalse(result["valid"])
+        self.assertIn("physical_device_profile_mismatch", result["failed_runs"][0]["reason"])
+        self.assertFalse(any(module in ("boot", "environment", "idle", "geekbench_runner") for module, *_ in backend.calls))
+
+    def test_campaign_wrong_physical_device_never_invokes_mode_adapter(self):
+        backend = Backend()
+        with patch.object(suite, "_call", side_effect=backend.call), \
+             patch.object(suite.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "refused")) as adapter:
+            result = suite.run_campaign("192.0.2.8:5555", Path(self.temp.name) / "wrong-campaign", "tp",
+                {**PROFILE, "serial": "expected-board"}, manifest=MANIFEST, adapter=["switch", "{mode}"],
+                validation_only=True)
+        self.assertFalse(result["valid"])
+        adapter.assert_not_called()
+        self.assertTrue(all('physical_device_profile_mismatch_before_adapter' in item['reason'] for item in result['failed_runs']))
+
     def test_campaign_requires_adapter_and_covers_both_modes_before_repeats(self):
         with self.assertRaises(ValueError):
             suite.run_campaign("fixture", Path(self.temp.name) / "invalid", "tp", PROFILE, manifest=MANIFEST, adapter=None)

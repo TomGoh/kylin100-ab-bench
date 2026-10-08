@@ -1,5 +1,8 @@
 import contextlib
 import io
+import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -25,6 +28,23 @@ class EntryPointTests(unittest.TestCase):
         with patch('abbench.geekbench_runner.run_geekbench', return_value={'valid': False}) as run:
             self.assertEqual(self.invoke(['geekbench', '--serial', 'board', '--out', '/new', '--kind', 'gpu', '--mode', 'xhyper']), 2)
             self.assertEqual(run.call_args.kwargs['api'], 'Vulkan')
+
+    def test_supply_preserves_evidence_and_requires_verified_external_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / 'profile.json'
+            profile.write_text(json.dumps({'serial': 'physical-board'}))
+            for verified, expected_rc in ((False, 2), (True, 0)):
+                out = Path(tmp) / f'{verified}.json'
+                with patch('abbench.supply.read_supply', return_value={'raw': 'observed'}) as read, \
+                     patch('abbench.supply.verify_supply_snapshot', return_value={'verified_off': verified}) as qualify:
+                    rc = self.invoke(['supply', '--serial', '192.0.2.8:5555', '--profile', str(profile), '--out', str(out)])
+                self.assertEqual(rc, expected_rc)
+                read.assert_called_once_with('192.0.2.8:5555')
+                qualify.assert_called_once_with({'raw': 'observed'}, physical_serial='physical-board', profile={'serial': 'physical-board'})
+                stored = json.loads(out.read_text())
+                self.assertEqual(stored['valid'], verified)
+                self.assertFalse(stored['sensor_calibrated'])
+                self.assertEqual(stored['supply']['raw'], 'observed')
 
 
 if __name__ == '__main__':

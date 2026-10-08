@@ -3,20 +3,40 @@ import fcntl
 import functools
 import hashlib
 import os
+import re
 from pathlib import Path
 import tempfile
 import threading
 
 
 _owners = {}
+_aliases = {}
 _guard = threading.RLock()
 
 
+def _physical_key(serial, physical_serial=None):
+    if physical_serial is None:
+        with _guard:
+            alias = _aliases.get(serial)
+            if alias is not None and alias in _owners:
+                return alias
+        if ":" in serial:
+            from .capture import shell
+            physical_serial = shell(serial, "getprop ro.serialno", timeout=5).stdout.strip()
+        else:
+            physical_serial = serial
+    if (not isinstance(physical_serial, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", physical_serial)
+            or physical_serial.lower() in ("unknown", "null", "none", "0")):
+        raise ValueError("physical_device_identity_required_for_lock")
+    return hashlib.sha256(physical_serial.encode()).hexdigest()
+
+
 class DeviceLock:
-    def __init__(self, serial):
+    def __init__(self, serial, physical_serial=None):
         if not isinstance(serial, str) or not serial.strip():
             raise ValueError("device serial must be nonempty")
-        self.key = hashlib.sha256(serial.encode()).hexdigest()
+        self.serial = serial
+        self.key = _physical_key(serial, physical_serial)
         self.owner = (os.getpid(), threading.get_ident())
 
     def __enter__(self):
@@ -26,6 +46,7 @@ class DeviceLock:
                 if existing[0] != self.owner:
                     raise ValueError("device_already_locked")
                 existing[2] += 1
+                _aliases[self.serial] = self.key
                 return self
             directory = Path(tempfile.gettempdir()) / "kylin100-ab-bench-locks"
             directory.mkdir(mode=0o700, exist_ok=True)
@@ -36,6 +57,7 @@ class DeviceLock:
                 os.close(fd)
                 raise ValueError("device_already_locked") from exc
             _owners[self.key] = [self.owner, fd, 1]
+            _aliases[self.serial] = self.key
             return self
 
     def __exit__(self, *_):
@@ -46,12 +68,20 @@ class DeviceLock:
                 fcntl.flock(item[1], fcntl.LOCK_UN)
                 os.close(item[1])
                 del _owners[self.key]
+                for serial, key in list(_aliases.items()):
+                    if key == self.key:
+                        del _aliases[serial]
 
 
 def serialized(function):
     @functools.wraps(function)
     def wrapped(*args, **kwargs):
         serial = kwargs.get("serial", args[0] if args else None)
-        with DeviceLock(serial):
+        profile = kwargs.get("profile", args[4] if len(args) > 4 else None)
+        # suite's profile is argument 4; campaign's is argument 3.
+        if not isinstance(profile, dict) and len(args) > 3 and isinstance(args[3], dict):
+            profile = args[3]
+        physical_serial = profile.get("serial") if isinstance(profile, dict) else None
+        with DeviceLock(serial, physical_serial=physical_serial):
             return function(*args, **kwargs)
     return wrapped

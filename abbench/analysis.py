@@ -13,6 +13,7 @@ from .capture import write_json
 from .perfetto import export_trace
 from .power import integrate
 from .trace_samples import normalize_battery_csv
+from .supply import verify_supply_window
 
 
 def verified_boottime(output):
@@ -134,13 +135,15 @@ def analyze_capture(directory, processor, *, profile=None, start_s=None, end_s=N
     capture = json.loads((target / "capture.json").read_text())
     try:
         before, after = capture["before"], capture["after"]
-        serial = capture["serial"]
+        transport_serial = capture["serial"]
+        serial = capture.get("physical_serial", transport_serial)
         same_boot = before["boot_id"] == after["boot_id"]
         UUID(before["boot_id"])
         bounds = before["t_s"], after["t_s"]
         if (capture["state"] != "exported" or not same_boot or not isinstance(serial, str) or not serial.strip()
                 or any(not _finite_number(value) or value < 0 for value in bounds) or bounds[1] <= bounds[0]
-                or any(probe.get("clock") != "proc_uptime_boottime" for probe in (before, after))):
+                or any(probe.get("clock") != "proc_uptime_boottime" for probe in (before, after))
+                or any("physical_serial" in probe and probe["physical_serial"] != serial for probe in (before, after))):
             raise ValueError("invalid capture source binding")
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise ValueError("analysis requires a complete exported single-boot source binding") from exc
@@ -162,6 +165,7 @@ def analyze_capture(directory, processor, *, profile=None, start_s=None, end_s=N
         rows = list(csv.DictReader(stream))
     clock_ok = verified_boottime(clock.stdout)
     result = {"valid": True, "boot_id": before["boot_id"], "serial": serial,
+              "transport_serial": transport_serial, "physical_serial": capture.get("physical_serial"),
               "export": export, "measurement_validated": False,
               "memory": memory_counters(rows, start_s, end_s, capture_start_s=bounds[0], capture_end_s=bounds[1])
               if clock_ok else {"valid": False, "reason": "memory_clock_unverified"},
@@ -196,12 +200,24 @@ def analyze_capture(directory, processor, *, profile=None, start_s=None, end_s=N
             elif profile.get("current_sign_validated") is not True:
                 result["power"] = {"valid": False, "reason": "current_sign_unverified"}
             else:
-                config = {"power_boundary": "battery_net", "discharge_sign": profile["discharge_sign_candidate"],
+                supply = verify_supply_window(capture.get("supply_before"), capture.get("supply_after"),
+                    boot_id=result["boot_id"], physical_serial=capture.get("physical_serial"), profile=profile,
+                    start_s=min(samples[0]["t_s"], start_s) if start_s is not None else samples[0]["t_s"],
+                    end_s=max(samples[-1]["t_s"], end_s) if end_s is not None else samples[-1]["t_s"])
+                result["supply_evidence"] = supply
+                boundary = "battery_side_device" if supply["verified_off"] else "battery_net"
+                if supply["verified_off"]:
+                    for sample in samples:
+                        sample["external_online"] = False
+                    normalized["external_supply_evidence"] = supply
+                    write_json(out / "normalized-battery.json", normalized)
+                config = {"power_boundary": boundary, "discharge_sign": profile["discharge_sign_candidate"],
                           "max_gap_s": profile.get("max_sample_gap_s", 3), "max_read_span_s": None,
-                          "input_supply_verified_off": False, "window_start_s": start_s, "window_end_s": end_s}
+                          "input_supply_verified_off": supply["verified_off"], "window_start_s": start_s, "window_end_s": end_s}
                 result["power"] = integrate(samples, config)
                 result["power"].update(measurement_validated=False, sensor_calibrated=False,
-                                       boundary_note="电池净能量变化；外部供电未知，不能报告整机功耗。",
+                                       boundary_note=("同次启动前后观察到所有已报告外部输入关闭，按设备电池侧计量；辅助角色只绑定软件接口分类，不能证明硬件隔离。期间需实际保持线缆拔除且无其他外部输入，端点不是连续监测，传感器未经校准。"
+                                                      if supply["verified_off"] else "电池净能量变化；外部供电未证实关闭，不能报告整机功耗。"),
                                        read_span_note="Perfetto批次时间不证明硬件同时读取或零耗时")
         else:
             result["power"] = {"valid": False, "reason": normalized["reason"]}

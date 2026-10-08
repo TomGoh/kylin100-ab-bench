@@ -224,6 +224,13 @@ def run_suite(serial, directory, mode, processor, profile, *, validation_only=Fa
             result["manifest_validation"] = contract
             if not contract["valid"]:
                 raise ValueError("formal_manifest_invalid:" + ",".join(contract["issues"]))
+        expected_device = profile.get("serial")
+        if expected_device is not None:
+            device = _call("capture", "clock_probe", serial)
+            if not isinstance(expected_device, str) or not expected_device.strip() or device.get("physical_serial") != expected_device:
+                raise ValueError("physical_device_profile_mismatch")
+            result["physical_serial"] = device["physical_serial"]
+            result["transport_serial"] = serial
         reboot = options.get("reboot", False)
         boot_repeats = options.get("boot_repeats", 1)
         if not isinstance(reboot, bool) or type(boot_repeats) is not int or not 1 <= boot_repeats <= 5:
@@ -248,6 +255,10 @@ def run_suite(serial, directory, mode, processor, profile, *, validation_only=Fa
         if not environment:
             raise ValueError("environment_unavailable")
         result["boot_id"] = environment["boot_id"]
+        if expected_device is not None:
+            device = _call("capture", "clock_probe", serial)
+            if device.get("physical_serial") != expected_device or device["boot_id"] != result["boot_id"]:
+                raise ValueError("physical_device_or_boot_changed")
         stable_s = options.get("wait_after_boot_s", profile.get("wait_after_boot_s", 300))
         if not validation_only:
             stable_s = max(300, stable_s)
@@ -514,14 +525,20 @@ def run_campaign(serial, directory, processor, profile, *, manifest, adapter, re
                     argv = [arg.format(mode=mode, serial=serial, out=str(target / name)) for arg in adapter]
                 except (KeyError, IndexError, ValueError) as exc:
                     raise ValueError("invalid_adapter_placeholder") from exc
-                previous_boot = _call("capture", "clock_probe", serial)["boot_id"]
+                device_before = _call("capture", "clock_probe", serial)
+                if profile.get("serial") is not None and device_before.get("physical_serial") != profile["serial"]:
+                    raise ValueError("physical_device_profile_mismatch_before_adapter")
+                previous_boot = device_before["boot_id"]
                 proc = subprocess.run(argv, shell=False, capture_output=True, text=True,
                                       timeout=min(options.get("adapter_timeout_s", 300), remaining))
                 (target / (name + "-adapter.stdout.txt")).write_text(proc.stdout)
                 (target / (name + "-adapter.stderr.txt")).write_text(proc.stderr)
                 if proc.returncode != 0 or time.monotonic() >= deadline:
                     raise ValueError("mode_adapter_failed_or_late")
-                current_boot = _call("capture", "clock_probe", serial)["boot_id"]
+                device_after = _call("capture", "clock_probe", serial)
+                if profile.get("serial") is not None and device_after.get("physical_serial") != profile["serial"]:
+                    raise ValueError("physical_device_profile_mismatch_after_adapter")
+                current_boot = device_after["boot_id"]
                 if previous_boot == current_boot:
                     raise ValueError("mode_adapter_did_not_establish_new_boot")
                 suite_options = {**options, "temperature_baseline_c": baseline, "settings_baseline": settings_baseline}
