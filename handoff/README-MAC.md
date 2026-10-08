@@ -7,7 +7,7 @@
 | 项目 | 内容 |
 |---|---|
 | 系统 | 安卓 16，`AOC/ums9620_2h10_native/ums9620_2h10:16/BP2A.250605.031.A3/eng.root:userdebug/release-keys`（10-08 12:30 编译），`su 0` 可用 |
-| boot_a | **XHyper cmp1**，sha256 `0235c68c…`（正在运行，启动编号 `cdbe71f1`） |
+| boot_a | **XHyper cmp1**，sha256 `0235c68c…`（14:32 起运行，启动编号 `67abc779`） |
 | boot_b | 新系统的原厂 boot，sha256 `30e41ac4…`，**不要动**：cmp1 起不来时引导程序会退回这里 |
 | vendor_boot_a/b | 新系统原厂的 `e557a0dd…`（`loglevel=1`），两种模式共用，不要动 |
 | 平板上的镜像副本 | `/data/local/tmp/boot_a.stock-20261008.img`（原厂，`30e41ac4…`）、`/data/local/tmp/xhyper_boot-cmp1.img`（`0235c68c…`）、`/data/local/tmp/xhyper_boot-cmp2.img`（`a8b67677…`） |
@@ -25,7 +25,7 @@
 | `t11206-images.json` | 适配器用的镜像表：native = 原厂，xhyper = **cmp1** |
 | `t11206-images-cmp2.json` | 同上，xhyper = **cmp2** |
 | `formal-manifest-cmp1.json` | 正式镜像清单（cmp1），`validate-manifest` 通过 |
-| `formal-manifest-cmp2.json` | 正式镜像清单（cmp2），只差在新系统上核实一次身份 |
+| `formal-manifest-cmp2.json` | 正式镜像清单（cmp2），`validate-manifest` 通过（14:31 在新系统上核实身份） |
 | `app_identity.py` | 装好 Geekbench 后，按框架的算法算出 `app_version`、`app_apk_sha256` 并写进清单 |
 
 ## 三、两个 XHyper 镜像怎么选
@@ -60,7 +60,7 @@
      --options examples/quick-coverage.json \
      --out runs/formal-cmp1-<日期时间> --repetitions 1
    ```
-   用 cmp2 时：清单换成 `handoff/formal-manifest-cmp2.json`；在 `mode-switch.argv.json` 末尾加上 `"--images", "handoff/t11206-images-cmp2.json"`；并先按第 3 步用 cmp2 的镜像表跑一次 `--mode xhyper`，核对成功后把 cmp2 清单里的 `identity_verified_on_device` 改为 `true`。
+   用 cmp2 时：清单换成 `handoff/formal-manifest-cmp2.json`；在 `mode-switch.argv.json` 末尾加上 `"--images", "handoff/t11206-images-cmp2.json"`。cmp2 已在 14:31 于新系统上开机核实（启动编号 `692b2be4`），清单已标为核实。
 5. **拔线功耗**按 MAC-WIRELESS 的流程：先在 USB 下用适配器切到要测的模式，等系统稳定，再切无线、拔线测量，测量期间不重启。适配器重启后会尝试 `adb connect`，但无线端口重启后是否还在没有验证过，所以不要在拔线状态下调用适配器。
 
 ## 五、出问题时
