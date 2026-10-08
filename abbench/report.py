@@ -9,11 +9,60 @@ from pathlib import Path
 from .compare import summarize
 
 
-_MODES = {"native": "原厂 Android", "xhyper": "搭载 XHyper"}
+_MODES = {"native": "原生 Android", "xhyper": "搭载 XHyper"}
 _SOURCES = (
     "source", "sources", "source_file", "source_path", "source_trace", "source_csv",
     "source_csv_sha256", "result_path", "provenance", "image_sha256", "manifest_path",
 )
+_PRIMARY_METRICS = {
+    "warm_reboot_to_system_complete_s": "正常重启至系统完成（观测上界）",
+    "geekbench_cpu_single": "Geekbench CPU 单核",
+    "geekbench_cpu_multi": "Geekbench CPU 多核",
+    "geekbench_gpu_score": "Geekbench GPU",
+    "geekbench_cpu_internal_runtime_s": "CPU 内部运行时长",
+    "geekbench_gpu_internal_runtime_s": "GPU 内部运行时长",
+    "memory_baseline_visible_total_bytes": "系统可见内存总量",
+    "memory_baseline_available_bytes": "基线可用内存",
+    "memory_baseline_estimated_unavailable_bytes": "基线估算非可用内存",
+    "geekbench_cpu_mem_available_sampled_min_bytes": "CPU 运行中采样可用内存最低值",
+    "geekbench_gpu_mem_available_sampled_min_bytes": "GPU 运行中采样可用内存最低值",
+    "geekbench_cpu_memory_after_available_bytes": "CPU 恢复后可用内存",
+    "geekbench_gpu_memory_after_available_bytes": "GPU 恢复后可用内存",
+}
+
+
+def _overview(groups):
+    rows = []
+    for group in groups:
+        metric, identity = group["metric"], group["comparison_key"]
+        label = _PRIMARY_METRICS.get(metric)
+        if metric.endswith(("_mean_power_w", "_energy_j")):
+            suffix = "_mean_power_w" if metric.endswith("_mean_power_w") else "_energy_j"
+            workload = metric[:-len(suffix)]
+            label = {"screen_on_idle": "亮屏静置", "screen_off_idle": "熄屏静置",
+                     "screen_off_standby": "已验证休眠窗口", "geekbench_cpu": "CPU 运行窗口",
+                     "geekbench_gpu": "GPU 运行窗口"}.get(workload, workload)
+            label += "平均功率" if suffix == "_mean_power_w" else "能量"
+        if label is None:
+            continue
+        if identity.get("power_boundary") == "battery_net":
+            label += "（电池净变化）"
+        if identity.get("api"):
+            label += " / " + str(identity["api"])
+        unit = identity.get("unit", "")
+        scale = 1024 ** 2 if unit == "bytes" else 1
+        unit = "MiB" if unit == "bytes" else unit
+        means = [_number(group[mode]["mean"] / scale if group[mode]["mean"] is not None else None)
+                 for mode in ("native", "xhyper")]
+        delta = _number(group["delta_pct"]) + "%" if group["delta_pct"] is not None else "—"
+        cells = [label, unit, means[0], means[1], delta,
+                 str(group["native"]["n_valid"]) + " / " + str(group["xhyper"]["n_valid"])]
+        rows.append("| " + " | ".join(_cell(value) for value in cells) + " |")
+    if not rows:
+        return []
+    return ["## 核心指标总览", "", "每一行仍采用下文对应分组的身份与观测窗口。有效次数按完整运行计数；缺失值显示为“—”。内存总览换算为 MiB，原始字节值保留在完整数据中。", "",
+            "| 指标 | 单位 | 原生均值 | XHyper 均值 | 差异 | 有效次数 原生 / XHyper |",
+            "|---|---|---:|---:|---:|---:|", *rows, ""]
 
 
 def _json_safe(value, notes, path="$"):
@@ -63,7 +112,7 @@ def _unavailable(group):
     if missing:
         return "；".join(missing)
     if group["delta_reason"] == "native_mean_zero":
-        return "原厂均值为零，百分比没有定义"
+        return "原生均值为零，百分比没有定义"
     return "差异百分比不可用：" + str(group["delta_reason"] or "缺少有限数值")
 
 
@@ -77,13 +126,14 @@ def _power_boundary(boundary):
 
 def _markdown(comparison, campaign, metadata):
     validation = metadata["validation_only"]
-    lines = ["# 工具验证报告" if validation else "# 原厂 Android 与 XHyper 数据汇总", ""]
+    lines = ["# 工具验证报告" if validation else "# 原生 Android 与 XHyper 数据汇总", ""]
     if validation:
-        lines += ["**本报告仅用于验证测试工具和数据处理链，不能作为正式原厂／XHyper 对比测试结果。**", ""]
+        lines += ["**本报告仅用于验证测试工具和数据处理链，不能作为正式原生／XHyper 对比测试结果。**", ""]
     else:
         lines += ["本报告汇总执行方提交的记录。模式、镜像身份和测量条件需要由原始证据支持，报告工具不会自行确认这些身份。", ""]
+    lines += _overview(comparison["groups"])
     lines += [
-        "差异百分比采用 `(XHyper 均值 / 原厂均值 - 1) × 100%`。分数的正值表示提高，时间和设备能耗的正值表示增加。电池净变化需要另外结合充放电方向解释。",
+        "差异百分比采用 `(XHyper 均值 / 原生均值 - 1) × 100%`。分数的正值表示提高，时间和设备能耗的正值表示增加。电池净变化需要另外结合充放电方向解释。",
         "", "完整测试运行构成统计样本。报告同时列出按启动标识统计的独立开机数；连续采样点的数量不能替代完整运行次数。本报告没有生成置信区间，也不能仅凭这些差值确认变化由虚拟化层独立造成。",
         "", "Markdown 数字使用最多六位有效数字展示；完整有效原始值保留在 `comparison.json` 中。展示位数不表示传感器精度。表中的“—”表示该统计值不可用，其原因保留在分组和失败记录中。",
         "", "## 执行材料", "",

@@ -365,7 +365,12 @@ class _Device:
                        "if [ -f \"$p\" ]; then cp \"$p\" " + shlex.quote(remote) + "/$f; fi; done", "copy-" + name)
             method = "stopped_geekbench_copy_with_wal_shm"
         target = self.out / name
-        pull_root(self.serial, remote, target, timeout_s=self.timeout)
+        budget = self.timeout if self.deadline is None else min(self.timeout, self.deadline - time.monotonic())
+        if budget <= 0:
+            raise RunnerError(self.deadline_reason)
+        pull_root(self.serial, remote, target, timeout_s=budget)
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise RunnerError(self.deadline_reason)
         exported = export_database(target / "history.db")
         _write(target / "export.json", exported)
         return exported, {"method": method, "directory": str(target), "integrity_checked": True}
@@ -382,7 +387,7 @@ class _Device:
 
 
 def run_geekbench(serial, kind, out, *, mode=None, api="Vulkan", expected_app_version="6.7.1",
-                  expected_boot_id=None, poll_interval_s=30, compute_timeout_s=1200,
+                  expected_boot_id=None, expected_apk_sha256=None, poll_interval_s=30, compute_timeout_s=1200,
                   persist_timeout_s=180, command_timeout_s=20, seen_uuids=()):
     """由统一编排调用一次 CPU 或 GPU；成功/失败都保存 run.json 并返回字典。
 
@@ -395,6 +400,8 @@ def run_geekbench(serial, kind, out, *, mode=None, api="Vulkan", expected_app_ve
         raise ValueError("kind must be cpu/gpu and mode native/xhyper/None")
     if api not in ("Vulkan", "OpenCL") or not 10 <= poll_interval_s <= 60:
         raise ValueError("invalid API or polling interval (10..60 seconds)")
+    if expected_apk_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", str(expected_apk_sha256)):
+        raise ValueError("expected APK identity must be a SHA-256 digest")
     if not 1 <= compute_timeout_s <= 1800 or not 1 <= persist_timeout_s <= 600 or not 1 <= command_timeout_s <= 60:
         raise ValueError("invalid bounded timeout")
     target = Path(out)
@@ -416,25 +423,35 @@ def run_geekbench(serial, kind, out, *, mode=None, api="Vulkan", expected_app_ve
         _write(target / "run.json", result)
 
     try:
+        device.deadline = time.monotonic() + 120
+        device.deadline_reason = "benchmark_preparation_timeout"
         identity = device.identity()
         result["boot_id"] = identity["boot_id"]
         if expected_boot_id is not None and expected_boot_id != identity["boot_id"]:
             raise RunnerError("unexpected_boot_id")
         result["app"] = device.metadata()
+        if time.monotonic() >= device.deadline:
+            raise RunnerError("benchmark_preparation_timeout")
         if result["app"]["version"] != expected_app_version:
             raise RunnerError("unexpected_app_version")
+        if expected_apk_sha256 is not None and result["app"].get("apk_sha256") != expected_apk_sha256:
+            raise RunnerError("unexpected_app_apk_sha256")
         # Baseline fallback is explicitly before this run, while no computation is active.
         if not device.sqlite_available:
             idle = device.observe("before-baseline")
             if idle["state"] in ("computing", "uploading"):
                 raise RunnerError("another_geekbench_run_active")
         before, proof = device.snapshot("history-before", allow_stop=True)
+        if time.monotonic() >= device.deadline:
+            raise RunnerError("benchmark_preparation_timeout")
         result["baseline_snapshot"] = proof
         baseline = max((rec["document_id"] for rec in before["records"]), default=0)
         click = device.start(kind, api)
         result["start_request_window"] = {key: click[key] for key in ("before_s", "after_s")}
         save_event("started", click)
         start_host = time.monotonic()
+        if start_host >= device.deadline:
+            raise RunnerError("benchmark_preparation_timeout")
         persistence_started = None
         previous_computing = None
         latest_ui = None

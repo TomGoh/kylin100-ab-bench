@@ -28,7 +28,7 @@ AUXILIARY_COMMANDS = {
 
 DESKTOP_SCRIPT = """printf 'AB_DESKTOP_BOOT_BEFORE\\n'; cat /proc/sys/kernel/random/boot_id
 printf 'AB_DESKTOP_HOME\\n'; cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME
-printf '\\nAB_DESKTOP_UNLOCKED\\n'; cmd user is-user-unlocked 0
+printf '\\nAB_DESKTOP_UNLOCKED\\n'; am get-started-user-state 0
 printf '\\nAB_DESKTOP_BOOTANIM\\n'; getprop init.svc.bootanim
 printf 'AB_DESKTOP_BOOTANIM_EXIT\\n'; getprop service.bootanim.exit
 printf 'AB_DESKTOP_ACTIVITY\\n'; dumpsys activity activities
@@ -49,16 +49,49 @@ def parse_desktop_evidence(raw):
     if before != after:
         raise ValueError("desktop_probe_crossed_boot")
     components = re.findall(r"(?m)^([A-Za-z][A-Za-z0-9_.]+)/(\.?[A-Za-z0-9_.$]+)$", fields["HOME"])
-    if len(components) != 1 or fields["UNLOCKED"] not in ("true", "false"):
+    user_states = {"BOOTING", "RUNNING_LOCKED", "RUNNING_UNLOCKING", "RUNNING_UNLOCKED", "STOPPING", "SHUTDOWN"}
+    if len(components) != 1 or fields["UNLOCKED"] not in ({"true", "false"} | user_states):
         raise ValueError("home_or_unlock_evidence_unavailable")
     home_package = components[0][0]
-    resumed = set(re.findall(r"(?m)^\s*mResumedActivity[=:]\s*ActivityRecord\{[^}\n]*\s([A-Za-z][A-Za-z0-9_.]+)/[A-Za-z0-9_.$]+(?:\s|\})", fields["ACTIVITY"]))
-    unlocked = fields["UNLOCKED"] == "true"
+    def normalized(component):
+        package, activity = component.split("/", 1)
+        return package + "/" + (package + activity if activity.startswith(".") else activity)
+    home_component = normalized("/".join(components[0]))
+    activity_pattern = r"[=:]\s*ActivityRecord\{[^}\n]*\s([A-Za-z][A-Za-z0-9_.]+/[A-Za-z0-9_.$]+)(?:\s|\})"
+    legacy, top = set(), set()
+    visible_task, history = False, False
+    for line in fields["ACTIVITY"].splitlines():
+        if re.match(r"^\s*\* Task\{", line):
+            visible_task, history = bool(re.search(r"\bvisible=true\b", line)), False
+        elif re.match(r"^\s*\* Hist\b", line):
+            history = True
+        elif re.match(r"^\s*isSleeping=true\s*$", line):
+            visible_task = False
+        if not history:
+            match = re.match(r"^\s*mResumedActivity" + activity_pattern, line)
+            if match:
+                legacy.add(normalized(match.group(1)))
+            match = re.match(r"^\s*topResumedActivity" + activity_pattern, line)
+            if match and visible_task:
+                top.add(normalized(match.group(1)))
+    focused = {normalized(value) for value in re.findall(r"(?m)^\s*mFocusedApp" + activity_pattern, fields["ACTIVITY"])}
+    # The modern field must belong to a visible, nonsleeping current task and
+    # agree with the focused application. History or multiple displays cannot
+    # turn a mention of the launcher into evidence that it is currently resumed.
+    modern = top if len(top) == 1 and focused == top else set()
+    active = legacy | modern
+    if len(legacy) > 1 or (top and (modern != top or (legacy and legacy != top))):
+        active = set()
+    resumed = {component.split("/", 1)[0] for component in active}
+    unlocked = fields["UNLOCKED"] in ("true", "RUNNING_UNLOCKED")
+    launcher_resumed = active == {home_component}
     animation_stopped = (fields["BOOTANIM"] == "stopped" or fields["BOOTANIM_EXIT"] == "1") and fields["BOOTANIM"] not in ("running", "restarting")
     return {"boot_id": before, "home_package": home_package, "user_unlocked": unlocked,
+            "user_state_raw": fields["UNLOCKED"], "top_resumed_components": sorted(top),
+            "focused_components": sorted(focused),
             "boot_animation_stopped": animation_stopped, "resumed_packages": sorted(resumed),
-            "launcher_resumed": resumed == {home_package},
-            "satisfied": unlocked and animation_stopped and resumed == {home_package},
+            "home_component": home_component, "launcher_resumed": launcher_resumed,
+            "satisfied": unlocked and animation_stopped and launcher_resumed,
             "first_draw_verified": False}
 
 
@@ -208,6 +241,7 @@ def measure_boot(serial, directory, timeout_s=180, reboot=False, *,
         "old_boot_id": None, "new_boot_id": None, "boot_id": None, "valid": False,
         "status": "failed", "reason": None, "elapsed_s": None,
         "reboot_request_host_s": None, "external_trigger_host_s": None,
+        "reboot_request_acknowledged": None,
         "measurement_boundary": (
             "adb_reboot_request_to_new_boot_system_complete_warm_proxy" if reboot else
             "new_boot_access_observation_to_system_complete_proxy_external_trigger_unknown"),
@@ -256,8 +290,11 @@ def measure_boot(serial, directory, timeout_s=180, reboot=False, *,
         if request is None:
             return finish("deadline_before_reboot_request")
         result["reboot_request_host_s"] = request["host_start_s"]
-        if request["error"] is not None or not request["within_deadline"]:
+        result["reboot_request_acknowledged"] = request["error"] is None
+        if not request["within_deadline"] or request["error"] not in (None, "command_timeout"):
             return finish("reboot_request_failed")
+        if request["error"] == "command_timeout":
+            result["limitations"].append("reboot acknowledgement timed out; readiness still requires a new boot identity, and the request is never repeated")
 
     first_access = None
     last_not_ready = None

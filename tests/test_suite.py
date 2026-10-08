@@ -32,6 +32,8 @@ class Backend:
             return {"valid": True, "issues": []}
         if module == "report":
             return {"created": True, "validation_only": kwargs["campaign"]["purpose"] == "validation"}
+        if module == 'ui_control':
+            return {'valid': True, 'boot_id': self.current_boot}
         if module == "boot":
             self.boot_index += 1
             self.current_boot = "new-boot-" + str(self.boot_index)
@@ -130,6 +132,13 @@ class SuiteTests(unittest.TestCase):
         self.assertEqual(sum(module == "geekbench_runner" for module, *_ in backend.calls), 1)
         self.assertIn("previous_workload", result["skipped"][-1]["reason"])
 
+    def test_identity_failure_excludes_earlier_formal_boot_values(self):
+        result, _ = self.run_fixture(identity={**IDENTITY, 'image_sha256': 'b' * 64},
+                                     options={'reboot': True, 'boot_repeats': 3})
+        boots = [row for row in result['metric_rows'] if row['metric'] == 'warm_reboot_to_system_complete_s']
+        self.assertEqual(len(boots), 3)
+        self.assertTrue(all(not row['valid'] and row['reason'] == 'formal_identity_unverified' for row in boots))
+
     def test_hardware_unknown_is_retained_but_never_formal_gpu_score(self):
         result, _ = self.run_fixture(Backend(unknown_gpu=True))
         gpu = [row for row in result["metric_rows"] if row["metric"] == "geekbench_gpu_score"]
@@ -173,6 +182,47 @@ class SuiteTests(unittest.TestCase):
                                adapter=["provided-adapter", "{mode}", "{serial}", "{out}"], repetitions=2, validation_only=True)
         self.assertEqual(order, ["native", "xhyper", "native", "xhyper"])
         self.assertFalse(adapter.call_args.kwargs["shell"])
+
+    def test_campaign_invalid_manifest_never_calls_switch_adapter_or_device(self):
+        calls = []
+        def invalid(module, function, *args, **kwargs):
+            calls.append(module)
+            if module == "manifest":
+                return {"valid": False, "issues": ["device_identity_unconfirmed"]}
+            if module == "report":
+                return {"created": True}
+            raise AssertionError("device must remain untouched")
+        with patch.object(suite, "_call", side_effect=invalid), patch.object(suite.subprocess, "run") as adapter:
+            result = suite.run_campaign("fixture", Path(self.temp.name) / "bad-campaign", "tp", PROFILE,
+                                        manifest={}, adapter=["provided-adapter"])
+        self.assertFalse(result["valid"])
+        self.assertEqual(calls, ["manifest", "report"])
+        adapter.assert_not_called()
+
+    def test_nonfinite_or_mistyped_budget_is_rejected_before_device_or_switch(self):
+        for options in ({"minimum_suite_budget_s": float("nan")}, {"cpu_timeout_s": float("inf")},
+                        {"recovery_s": -1}, {"reboot": "true"}, {"boot_repeats": True}):
+            with self.subTest(options=options), patch.object(suite, "_call") as device, \
+                 patch.object(suite.subprocess, "run") as adapter:
+                with self.assertRaises(ValueError):
+                    suite.run_campaign("fixture", Path(self.temp.name) / "invalid-options", "tp", PROFILE,
+                                        manifest=MANIFEST, adapter=["provided-adapter"], options=options)
+                device.assert_not_called()
+                adapter.assert_not_called()
+
+    def test_formal_budget_includes_required_recovery_and_configured_five_boots(self):
+        backend = Backend()
+        options = {"screen_on_idle_s": 180, "screen_off_standby_s": 300, "cpu_timeout_s": 780,
+                   "gpu_timeout_s": 540, "persist_timeout_s": 90, "recovery_s": 0,
+                   "cooling_wait_s": 120, "boot_repeats": 5}
+        with patch.object(suite, "_call", side_effect=backend.call), patch.object(suite, "_deadline", return_value=4701), \
+             patch.object(suite.time, "monotonic", return_value=1), patch.object(suite.subprocess, "run") as adapter:
+            result = suite.run_campaign("fixture", Path(self.temp.name) / "five-boots", "tp", PROFILE,
+                                        manifest=MANIFEST, adapter=["provided-adapter"], options=options)
+        adapter.assert_not_called()
+        self.assertFalse(result["valid"])
+        self.assertTrue(all(item["reason"] == "deadline_insufficient_suite_coverage_budget"
+                            for item in result["skipped"] if item["name"] != "minimum_boot_samples"))
 
     def test_noop_adapter_and_unconfigured_positive_mode_evidence_rejected(self):
         backend = Backend()
@@ -235,6 +285,21 @@ class SuiteTests(unittest.TestCase):
         adapter.assert_called_once()
         self.assertFalse(result["valid"])
         self.assertEqual(result["skipped"][-1]["reason"], "interrupted_no_more_mode_switches")
+
+    def test_uncertain_workload_state_does_not_switch_next_image(self):
+        backend = Backend()
+        def switch(*args, **kwargs):
+            backend.current_boot += '-new'
+            return subprocess.CompletedProcess([], 0, '', '')
+        stopped = {'valid': False, 'temperature_baseline_c': 30, 'metric_rows': [], 'skipped': [],
+                   'failed_runs': [{'name': 'geekbench-cpu', 'reason': 'timeout'}],
+                   'requires_device_idle_confirmation': True}
+        with patch.object(suite, 'run_suite', return_value=stopped), patch.object(suite, '_call', side_effect=backend.call), \
+             patch.object(suite.subprocess, 'run', side_effect=switch) as adapter:
+            result = suite.run_campaign('fixture', Path(self.temp.name) / 'uncertain', 'tp', PROFILE,
+                                        manifest=MANIFEST, adapter=['provided-adapter'], validation_only=True)
+        adapter.assert_called_once()
+        self.assertTrue(any('state_unconfirmed' in x['reason'] for x in result['skipped']))
 
     def test_three_boot_samples_use_three_actual_new_identities(self):
         result, backend = self.run_fixture(validation_only=True, options={"reboot": True, "boot_repeats": 3})

@@ -32,6 +32,28 @@ def _deadline(options):
     return time.monotonic() + (value - datetime.now(timezone.utc)).total_seconds()
 
 
+def _options(value):
+    if value is not None and not isinstance(value, dict):
+        raise ValueError("options must be an object")
+    result = dict(value or {})
+    nonnegative = {"wait_after_boot_s", "recovery_s", "cooling_wait_s", "minimum_suite_budget_s"}
+    positive = {"screen_on_idle_s", "screen_off_standby_s", "cpu_timeout_s", "gpu_timeout_s",
+                "persist_timeout_s", "geekbench_poll_interval_s", "adapter_timeout_s", "max_start_temperature_c"}
+    for name in nonnegative | positive | {"temperature_baseline_c"}:
+        if name not in result or (name == "temperature_baseline_c" and result[name] is None):
+            continue
+        number = result[name]
+        if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number):
+            raise ValueError(name + " must be finite numeric")
+        if (name in nonnegative and number < 0) or (name in positive and number <= 0):
+            raise ValueError(name + " is outside its allowed range")
+    if "reboot" in result and not isinstance(result["reboot"], bool):
+        raise ValueError("reboot must be boolean")
+    if "boot_repeats" in result and (type(result["boot_repeats"]) is not int or not 1 <= result["boot_repeats"] <= 5):
+        raise ValueError("boot_repeats must be 1..5")
+    return result
+
+
 def _path(value):
     if not isinstance(value, str) or not value.startswith("/") or ".." in value.split("/") or any(c in value for c in "\n\r\0"):
         raise ValueError("identity paths must be explicit absolute paths")
@@ -120,7 +142,7 @@ def run_suite(serial, directory, mode, processor, profile, *, validation_only=Fa
     """单模式全覆盖入口；成功采集、正式身份、计量资格分别保存。"""
     if mode not in ("native", "xhyper") or not isinstance(profile, dict) or not isinstance(validation_only, bool):
         raise ValueError("invalid suite mode/profile/purpose")
-    options = dict(options or {})
+    options = _options(options)
     deadline = _deadline(options)
     target = Path(directory)
     target.mkdir(parents=True, exist_ok=False)
@@ -130,6 +152,7 @@ def run_suite(serial, directory, mode, processor, profile, *, validation_only=Fa
               "temperature_baseline_c": options.get("temperature_baseline_c"),
               "pairing_verified": options.get("temperature_baseline_c") is not None,
               "comparison_settings": {}, "settings_verified": False,
+              "requires_device_idle_confirmation": False,
               "limitations": ["单模式套件不能自行构成双侧对比", "USB电池净变化不是整机功耗",
                               "累计待机端点包含终点查询及唤醒开销"]}
 
@@ -215,6 +238,7 @@ def run_suite(serial, directory, mode, processor, profile, *, validation_only=Fa
                 result["boot_id"] = boot["boot_id"]
                 row("warm_reboot_to_system_complete_s", boot.get("request_to_system_complete_observed_s"),
                     target.name + f"-boot-{index + 1}", boot_id=boot["boot_id"], unit="s",
+                    observation_interval_s=boot.get("request_to_system_complete_interval_s"),
                     measurement_boundary=boot["measurement_boundary"], source=str(target / f"boot-{index + 1}/boot.json"))
         else:
             result["skipped"].append({"name": "boot_duration", "reason": "reboot_not_requested_no_new_boot_sample"})
@@ -282,6 +306,7 @@ def run_suite(serial, directory, mode, processor, profile, *, validation_only=Fa
             duration = options.get(kind + "_s", 10 if validation_only else default_s)
             idle = step(kind, duration + 180, lambda k=kind, d=duration: _call("idle", "run_idle", serial,
                         target / k, kind=k, duration_s=d, mode=mode, power_config=profile,
+                        prepare_keyguard=True,
                         battery_path=profile.get("battery_path", "/sys/class/power_supply/battery"),
                         usb_online_path=profile.get("external_supply_path", "/sys/class/power_supply/usb/online")))
             if idle:
@@ -328,59 +353,92 @@ def run_suite(serial, directory, mode, processor, profile, *, validation_only=Fa
                     raise ValueError("settings_not_restored_or_changed_before_workload")
                 if remaining() < compute_s + persist_s + 180:
                     raise ValueError("deadline_after_cooling_before_workload")
-                if compute_s + persist_s + 120 > 1800:
+                if compute_s + persist_s + 240 > 1800:
                     raise ValueError("capture_limit_cannot_cover_allowed_workload_lifecycle")
+                prepared_ui = _call("ui_control", "prepare_ui", serial, target / (k + "-ui-preparation"),
+                                    expected_boot_id=result["boot_id"],
+                                    deadline_monotonic_s=None if math.isinf(deadline) else deadline)
+                if not prepared_ui.get("valid"):
+                    raise ValueError("ui_preparation_failed:" + str(prepared_ui.get("reason")))
                 capture_dir = target / (k + "-telemetry")
                 armed = False
                 run, workload_error = None, None
                 try:
                     _call("capture", "start_capture", serial, capture_dir,
-                          duration_s=min(1800, compute_s + persist_s + 120), mode=mode)
+                          duration_s=min(1800, compute_s + persist_s + 240), mode=mode)
                     armed = True
+                    time.sleep(2)
+                    result["requires_device_idle_confirmation"] = True
                     run = _call("geekbench_runner", "run_geekbench", serial, k, target / k, mode=mode,
                                 api=options.get("gpu_api", "Vulkan"), expected_boot_id=result["boot_id"],
                                 expected_app_version=(manifest["images"][mode]["app_version"] if not validation_only else
                                                       profile.get("expected_app_version_from_preflight", "6.7.1")),
-                                compute_timeout_s=compute_s, persist_timeout_s=persist_s, seen_uuids=seen)
+                                expected_apk_sha256=None if validation_only else manifest["images"][mode]["app_apk_sha256"],
+                                compute_timeout_s=compute_s, persist_timeout_s=persist_s,
+                                poll_interval_s=options.get("geekbench_poll_interval_s", 60), seen_uuids=seen)
                 except (ValueError, OSError, subprocess.SubprocessError) as exc:
                     workload_error = str(exc)
                 finally:
                     if armed:
+                        time.sleep(2)
                         _call("capture", "stop_capture", capture_dir)
                 if workload_error or not run or not run["valid"]:
                     analyze(capture_dir, None, None, "geekbench_" + k, target.name + "-" + k,
                             False, boundary="failed_workload_capture_lifecycle")
                     raise ValueError("benchmark_failed:" + str(workload_error or run.get("reason")))
+                result["requires_device_idle_confirmation"] = False
                 seen.add(run["result_uuid"])
                 eligible = k != "gpu" or run.get("gpu_hardware_verified") is True
                 reason = None if eligible else "gpu_hardware_identity_unverified"
                 if not validation_only and run["app"].get("apk_sha256") != manifest["images"][mode]["app_apk_sha256"]:
                     eligible, reason = False, "app_apk_identity_mismatch"
+                observer = {"method": run.get("observer"),
+                            "poll_interval_s": run.get("poll_interval_s", options.get("geekbench_poll_interval_s", 60)),
+                            "ui_max_attempts": 3, "telemetry": "perfetto_power_memory_v1"}
                 for metric, value in _score_rows(run):
                     row(metric, value, target.name + "-" + k, eligible, reason, unit="score",
                         version=run["app"]["version"], apk_sha256=run["app"].get("apk_sha256"),
                         api=run.get("requested_api"), api_raw=run.get("result", {}).get("api_raw"),
-                        source=str(target / k / "result.json"))
+                        uuid=run["result_uuid"], observer=observer, source=str(target / k / "result.json"))
+                row("geekbench_" + k + "_internal_runtime_s", run.get("internal_runtime_s"),
+                    target.name + "-" + k, eligible, reason, unit="s", observer=observer,
+                    version=run["app"]["version"], apk_sha256=run["app"].get("apk_sha256"),
+                    api=run.get("requested_api"), api_raw=run.get("result", {}).get("api_raw"),
+                    measurement_boundary="geekbench_reported_internal_runtime",
+                    uuid=run["result_uuid"], source=str(target / k / "result.json"))
                 start = run["start_request_window"]["before_s"]
                 window = run.get("compute_complete_window")
                 reliable = (run.get("compute_complete_observed") is True and window is not None
                             and window["lower_s"] > run["start_request_window"]["after_s"]
                             and 0 <= window["upper_s"] - window["lower_s"] <= 120)
-                end = window["upper_s"] if reliable else run["persisted_window"]["after_s"]
-                boundary = "click_to_compute_complete_observed_upper" if reliable else "click_to_result_persisted_observed_lifecycle"
+                persisted = run.get("persisted_window")
+                end = window["upper_s"] if reliable else (persisted["after_s"] if persisted else run.get("end_boottime_s"))
+                if end is None:
+                    raise ValueError("benchmark_end_boundary_unavailable")
+                boundary = ("click_to_compute_complete_observed_upper" if reliable else
+                            "click_to_result_persisted_observed_lifecycle" if persisted else
+                            "click_to_result_exported_observed_lifecycle")
                 result[k + "_window"] = {"start_s": start, "end_s": end,
                     "boundary": boundary,
                     "compute_end_interval": window, "precise_compute_window": False}
                 result[k + "_observer"] = {"method": run.get("observer"), "poll_interval_s": run.get("poll_interval_s"),
                     "overhead_quantified": False, "note": "界面观察存在开销，双方必须使用同一观察设置。"}
                 workload_identity = {"version": run["app"]["version"], "apk_sha256": run["app"].get("apk_sha256"),
-                                     "api": run.get("requested_api"), "api_raw": run.get("result", {}).get("api_raw")}
+                                     "api": run.get("requested_api"), "api_raw": run.get("result", {}).get("api_raw"),
+                                     "observer": observer, "uuid": run["result_uuid"]}
                 data = analyze(capture_dir, start, end, "geekbench_" + k, target.name + "-" + k, eligible,
                                boundary, workload_identity)
                 time.sleep(min(recovery, max(0, remaining())))
-                _call("environment", "capture_memory_baseline", serial, target / (k + "-memory-after"),
+                after_memory = _call("environment", "capture_memory_baseline", serial, target / (k + "-memory-after"),
                       count=1, interval_s=10, expected_boot_id=result["boot_id"],
                       deadline_monotonic_s=None if math.isinf(deadline) else deadline)
+                for field, metric in (("mean_mem_available_bytes", "available_bytes"),
+                                      ("mean_estimated_unavailable_bytes", "estimated_unavailable_bytes")):
+                    row("geekbench_" + k + "_memory_after_" + metric,
+                        (after_memory.get("aggregate") or {}).get(field), target.name + "-" + k,
+                        eligible and after_memory.get("valid") is True, after_memory.get("reason"), unit="bytes",
+                        measurement_boundary="android_kernel_visible_memory_after_recovery",
+                        source=str(target / (k + "-memory-after")), **workload_identity)
                 return {"valid": eligible, "reason": reason, "run": run, "analysis": data}
 
             completed = step("geekbench-" + kind, compute_s + persist_s + 300, benchmark)
@@ -393,6 +451,9 @@ def run_suite(serial, directory, mode, processor, profile, *, validation_only=Fa
         result["failed_runs"].append({"name": "suite", "reason": "interrupted" if isinstance(exc, KeyboardInterrupt) else str(exc)})
         result["valid"] = False
     finally:
+        if not validation_only and not result["identity_verified"]:
+            for entry in result["metric_rows"]:
+                entry.update(valid=False, reason=entry.get("reason") or "formal_identity_unverified")
         save()
         campaign = {"purpose": result["purpose"], "identity_verified": result["identity_verified"],
                     "failed_runs": result["failed_runs"], "skipped": result["skipped"],
@@ -410,28 +471,41 @@ def run_campaign(serial, directory, processor, profile, *, manifest, adapter, re
         raise ValueError("automatic AB requires an explicit adapter argv list")
     if type(repetitions) is not int or not 1 <= repetitions <= 5:
         raise ValueError("repetitions must be 1..5")
-    options = dict(options or {})
+    options = _options(options)
     target = Path(directory)
     target.mkdir(parents=True, exist_ok=False)
     deadline = _deadline(options)
     result = {"purpose": "validation" if validation_only else "formal", "suites": [], "metric_rows": [],
               "failed_runs": [], "skipped": [], "repetitions_requested": repetitions, "valid": False,
               "minimum_boot_target_each_mode": 3, "adapter": adapter}
+    if not validation_only:
+        contract = _call("manifest", "validate_manifest", manifest)
+        result["manifest_validation"] = contract
+        if not contract["valid"]:
+            result["failed_runs"].append({"name": "campaign_preflight",
+                "reason": "formal_manifest_invalid:" + ",".join(contract["issues"])})
+            result["report"] = _call("report", "create_report", [], target / "report", campaign=result)
+            _write(target / "campaign.json", result)
+            return result
     baseline = options.get("temperature_baseline_c")
     settings_baseline = options.get("settings_baseline")
     interrupted = False
+    halt_reason = None
     for repetition in range(repetitions):
         if interrupted:
             break
         for mode in ("native", "xhyper"):
             name = f"{repetition + 1:02d}-{mode}"
             remaining = deadline - time.monotonic()
+            recovery = options.get("recovery_s", 60) if validation_only else max(60, options.get("recovery_s", 60))
+            boots = options.get("boot_repeats", 3 if repetition == 0 else 1) if options.get("reboot", not validation_only) else 0
+            stability = 0 if validation_only else max(300, options.get("wait_after_boot_s", profile.get("wait_after_boot_s", 300)))
             estimated = (options.get("screen_on_idle_s", 10 if validation_only else 480) +
                          options.get("screen_off_standby_s", 10 if validation_only else 900) +
                          options.get("cpu_timeout_s", 1200) + options.get("gpu_timeout_s", 1200) +
-                         2 * options.get("persist_timeout_s", 180) + 4 * options.get("recovery_s", 60) +
+                         2 * options.get("persist_timeout_s", 180) + 4 * recovery +
                          2 * min(600, options.get("cooling_wait_s", 600)) + 1320 +
-                         (0 if validation_only else (3 if repetition == 0 else 1) * 180 + 300))
+                         boots * 180 + stability)
             if remaining <= max(options.get("minimum_suite_budget_s", estimated), estimated):
                 result["skipped"].append({"name": name, "reason": "deadline_insufficient_suite_coverage_budget"})
                 continue
@@ -466,9 +540,14 @@ def run_campaign(serial, directory, processor, profile, *, manifest, adapter, re
                 result["skipped"].extend(suite["skipped"])
                 if any(item.get("reason") == "interrupted" for item in suite["failed_runs"]):
                     interrupted = True
+                    halt_reason = "interrupted_no_more_mode_switches"
+                if suite.get("requires_device_idle_confirmation") is True:
+                    interrupted = True
+                    halt_reason = "workload_or_capture_state_unconfirmed_no_more_mode_switches"
             except (ValueError, OSError, subprocess.SubprocessError, KeyboardInterrupt) as exc:
                 if isinstance(exc, KeyboardInterrupt):
                     interrupted = True
+                    halt_reason = "interrupted_no_more_mode_switches"
                 for channel in ("stdout", "stderr"):
                     raw = getattr(exc, channel, None)
                     if raw is not None:
@@ -477,7 +556,7 @@ def run_campaign(serial, directory, processor, profile, *, manifest, adapter, re
                 result["failed_runs"].append({"name": name, "reason": "interrupted" if isinstance(exc, KeyboardInterrupt) else str(exc)})
             _write(target / "campaign.json", result)
             if interrupted:
-                result["skipped"].append({"name": "remaining_campaign", "reason": "interrupted_no_more_mode_switches"})
+                result["skipped"].append({"name": "remaining_campaign", "reason": halt_reason})
                 break
     boot_counts = {mode: len({row["boot_id"] for row in result["metric_rows"] if row["mode"] == mode and
                               row["metric"] == "warm_reboot_to_system_complete_s" and row["valid"]}) for mode in ("native", "xhyper")}

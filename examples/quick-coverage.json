@@ -1,0 +1,16 @@
+{
+  "reboot": true,
+  "boot_repeats": 3,
+  "wait_after_boot_s": 300,
+  "screen_on_idle_s": 180,
+  "screen_off_standby_s": 300,
+  "recovery_s": 60,
+  "cooling_wait_s": 120,
+  "cpu_timeout_s": 780,
+  "gpu_timeout_s": 540,
+  "persist_timeout_s": 90,
+  "geekbench_poll_interval_s": 60,
+  "gpu_api": "Vulkan",
+  "max_start_temperature_c": 40.0,
+  "deadline_utc": "2026-10-08T07:40:00Z"
+}

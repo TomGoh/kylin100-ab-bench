@@ -23,7 +23,7 @@ def desktop_evidence(*, unlocked="true", boot=NEW, resumed="com.example.launcher
     return (f"AB_DESKTOP_BOOT_BEFORE\n{boot}\nAB_DESKTOP_HOME\n{home}\n"
             f"AB_DESKTOP_UNLOCKED\n{unlocked}\nAB_DESKTOP_BOOTANIM\n{animation}\n"
             f"AB_DESKTOP_BOOTANIM_EXIT\n{exit_value}\nAB_DESKTOP_ACTIVITY\n"
-            f"  mResumedActivity: ActivityRecord{{abcd u0 {resumed}/.Activity t1}}\n"
+            f"  mResumedActivity: ActivityRecord{{abcd u0 {resumed}/.Launcher t1}}\n"
             f"AB_DESKTOP_BOOT_AFTER\n{boot}\n")
 
 
@@ -203,6 +203,23 @@ class BootObserverTests(unittest.TestCase):
         self.assertEqual(result["reason"], "reboot_request_failed")
         self.assertIsNone(result["new_boot_id"])
 
+    def test_reboot_ack_timeout_observes_new_boot_without_reissuing_request(self):
+        class LostAck(Simulation):
+            def run(self, args, **kwargs):
+                if args[-1] == 'reboot':
+                    self.calls.append({'args': args, 'start': self.now, 'timeout': kwargs['timeout']})
+                    self.now += kwargs['timeout']
+                    raise subprocess.TimeoutExpired(args, kwargs['timeout'])
+                return super().run(args, **kwargs)
+        simulation = LostAck([probe(), probe(NEW), probe(NEW)])
+        result, _ = self.collect(simulation, reboot=True, timeout_s=15)
+        self.assertTrue(result['valid'])
+        self.assertFalse(result['reboot_request_acknowledged'])
+        self.assertEqual(sum(call['args'][-1] == 'reboot' for call in simulation.calls), 1)
+        result, _ = self.collect(LostAck([probe()]), reboot=True, timeout_s=5)
+        self.assertFalse(result['valid'])
+        self.assertIsNone(result['boot_id'])
+
     def test_probe_rejects_missing_duplicate_and_nonfinite_uptime(self):
         for raw in ("", probe().replace("uptime=100", "uptime=nan"),
                     probe() + f"boot_id_before={OLD}\n"):
@@ -258,6 +275,24 @@ class BootObserverTests(unittest.TestCase):
         result, _ = self.collect(simulation, desktop=True, timeout_s=15)
         self.assertFalse(result["valid"])
         self.assertEqual(result["reason"], "desktop_observation_cross_boot")
+
+    def test_android16_user_state_and_current_top_resumed_require_matching_focus(self):
+        raw = desktop_evidence(unlocked="RUNNING_UNLOCKED")
+        activity = ("  * Task{abc type=home visible=true}\n    isSleeping=false\n"
+                    "    topResumedActivity=ActivityRecord{abc u0 com.example.launcher/.Launcher t1 d0}\n"
+                    "    * Hist #0: ActivityRecord{abc u0 com.example.launcher/.Launcher t1}\n"
+                    "  mFocusedApp=ActivityRecord{abc u0 com.example.launcher/.Launcher t1 d0}\n")
+        raw = raw.replace("  mResumedActivity: ActivityRecord{abcd u0 com.example.launcher/.Launcher t1}\n", activity)
+        self.assertTrue(parse_desktop_evidence(raw)["satisfied"])
+        self.assertFalse(parse_desktop_evidence(raw.replace("/.Launcher t1", "/.Settings t1"))["satisfied"])
+        self.assertFalse(parse_desktop_evidence(raw.replace("RUNNING_UNLOCKED", "RUNNING_LOCKED"))["satisfied"])
+        self.assertFalse(parse_desktop_evidence(raw.replace("visible=true", "visible=false"))["satisfied"])
+        self.assertFalse(parse_desktop_evidence(raw.replace("isSleeping=false", "isSleeping=true"))["satisfied"])
+        self.assertFalse(parse_desktop_evidence(raw.replace("mFocusedApp=ActivityRecord{abc u0 com.example.launcher", "mFocusedApp=ActivityRecord{abc u0 com.example.other"))["satisfied"])
+        history = raw.replace("    topResumedActivity", "    * Hist #1: ActivityRecord{old u0 com.example.launcher/.Launcher t1}\n    topResumedActivity")
+        self.assertFalse(parse_desktop_evidence(history)["satisfied"])
+        ambiguous = raw.replace("    * Hist #0:", "    topResumedActivity=ActivityRecord{xyz u0 com.example.other/.Home t2}\n    * Hist #0:")
+        self.assertFalse(parse_desktop_evidence(ambiguous)["satisfied"])
 
 
 if __name__ == "__main__":

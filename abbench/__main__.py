@@ -192,7 +192,7 @@ def main():
             return 0
         elif args.command == "idle":
             from .idle import run_idle
-            result = run_idle(args.serial, args.out, kind=args.kind, duration_s=args.duration, mode=args.mode)
+            result = run_idle(args.serial, args.out, kind=args.kind, duration_s=args.duration, mode=args.mode, prepare_keyguard=True)
             emit(result)
             return 0 if result.get("valid") is True else 2
         elif args.command == "geekbench":

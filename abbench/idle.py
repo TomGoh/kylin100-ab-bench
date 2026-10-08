@@ -165,7 +165,8 @@ class _Device:
 
 def run_idle(serial, directory, kind="screen_on_idle", duration_s=None, mode="unknown", *,
              power_config=None, battery_path="/sys/class/power_supply/battery",
-             usb_online_path="/sys/class/power_supply/usb/online", command_timeout_s=8):
+             usb_online_path="/sys/class/power_supply/usb/online", command_timeout_s=8,
+             prepare_keyguard=False):
     """Run one automatic window and restore changed settings in its original boot.
 
     ``duration_s`` is required; the suite chooses formal or short validation
@@ -179,6 +180,8 @@ def run_idle(serial, directory, kind="screen_on_idle", duration_s=None, mode="un
         raise ValueError("duration_s must be 1..1800 whole seconds")
     if mode not in ("native", "xhyper", "unknown"):
         raise ValueError("invalid mode label")
+    if type(prepare_keyguard) is not bool:
+        raise ValueError("prepare_keyguard must be boolean")
     if isinstance(command_timeout_s, bool) or not isinstance(command_timeout_s, (int, float)) or not math.isfinite(command_timeout_s) or not 0 < command_timeout_s <= 15:
         raise ValueError("command_timeout_s must be >0 and <=15")
     for path in (battery_path, usb_online_path):
@@ -230,6 +233,11 @@ def run_idle(serial, directory, kind="screen_on_idle", duration_s=None, mode="un
                 result["settings"][key]["applied"] = observed.strip() == value
                 if not result["settings"][key]["applied"]:
                     raise ValueError("screen_setting_readback_mismatch_" + key)
+        if prepare_keyguard:
+            from .ui_control import prepare_ui
+            result["ui_preparation"] = prepare_ui(serial, target / "ui-preparation", expected_boot_id=result["boot_id"])
+            if not result["ui_preparation"]["valid"]:
+                raise ValueError("ui_preparation_failed:" + str(result["ui_preparation"].get("reason")))
         device.shell("screen-wake", "input keyevent 224")
         device.shell("home", "input keyevent 3")
         device.screen("on")

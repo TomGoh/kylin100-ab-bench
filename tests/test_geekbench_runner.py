@@ -240,7 +240,7 @@ class RunTests(unittest.TestCase):
         out = Path(self.temp.name) / "run-1"
         clock = kwargs.pop("clock", [0])
         with patch.object(runner, "_Device", FakeDevice), patch.object(runner.time, "sleep"), \
-             patch.object(runner.time, "monotonic", side_effect=itertools.chain(clock, itertools.repeat(clock[-1]))):
+             patch.object(runner.time, "monotonic", side_effect=itertools.chain(clock, itertools.count(clock[-1] + 1))):
             # Provide a real finite clock for timeout controls when a sequence is requested.
             if "compute_timeout_s" not in kwargs:
                 kwargs["compute_timeout_s"] = 1200
@@ -273,16 +273,38 @@ class RunTests(unittest.TestCase):
     def test_timeout_and_cross_boot_never_report_success(self):
         FakeDevice.query_sequence = [False]
         FakeDevice.states = ["computing"]
-        result, _ = self.run_fixture(clock=[0, 2], compute_timeout_s=1)
+        result, _ = self.run_fixture(clock=[0, 0, 2], compute_timeout_s=1)
         self.assertFalse(result["valid"])
         self.assertIn("timeout", result["reason"])
         with tempfile.TemporaryDirectory() as directory, patch.object(runner, "_Device", FakeDevice), \
-             patch.object(runner.time, "sleep"), patch.object(runner.time, "monotonic", side_effect=[0, 1, 2, 3]):
+             patch.object(runner.time, "sleep"), patch.object(runner.time, "monotonic", side_effect=itertools.count()):
             FakeDevice.query_sequence = [True]
             FakeDevice.end_boot = "boot-b"
             result = runner.run_geekbench("fixture-serial", "cpu", Path(directory) / "crossboot")
             self.assertFalse(result["valid"])
             self.assertEqual(result["reason"], "cross_boot_result")
+
+    def test_slow_preparation_never_clicks_benchmark_after_budget(self):
+        class SlowDevice(FakeDevice):
+            clock, clicked = 0, False
+            def metadata(self):
+                type(self).clock = 121
+                return super().metadata()
+            def start(self, kind, api):
+                type(self).clicked = True
+                return super().start(kind, api)
+        with patch.object(runner, '_Device', SlowDevice), patch.object(runner.time, 'monotonic', side_effect=lambda: SlowDevice.clock):
+            result = runner.run_geekbench('fixture', 'cpu', Path(self.temp.name) / 'slow-prepare')
+        self.assertFalse(result['valid'])
+        self.assertEqual(result['reason'], 'benchmark_preparation_timeout')
+        self.assertFalse(SlowDevice.clicked)
+
+    def test_apk_mismatch_is_rejected_before_benchmark_click(self):
+        with patch.object(FakeDevice, 'start') as start:
+            result, _ = self.run_fixture(expected_apk_sha256='a' * 64)
+        self.assertFalse(result['valid'])
+        self.assertEqual(result['reason'], 'unexpected_app_apk_sha256')
+        start.assert_not_called()
 
     def test_late_persisted_result_cannot_bypass_stage_deadline(self):
         FakeDevice.query_sequence = [False, True]

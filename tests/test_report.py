@@ -56,8 +56,18 @@ class ReportTests(unittest.TestCase):
         self.assertTrue(result["validation_only"])
         self.assertTrue(result["has_comparable_groups"])
         self.assertTrue(markdown.startswith("# 工具验证报告\n"))
-        self.assertIn("不能作为正式原厂／XHyper 对比测试结果", markdown)
+        self.assertIn("不能作为正式原生／XHyper 对比测试结果", markdown)
         self.assertFalse(comparison["report_metadata"]["identity_verified_by_report"])
+
+    def test_core_overview_uses_accepted_groups_and_preserves_power_boundary(self):
+        rows = [row("native", 1048576, "n", "nb", metric="memory_baseline_available_bytes", unit="bytes"),
+                row("xhyper", 2097152, "x", "xb", metric="memory_baseline_available_bytes", unit="bytes"),
+                row("xhyper", 999, "bad", "xb", metric="memory_baseline_available_bytes", unit="bytes", valid=False),
+                row("xhyper", -0.2, "p", "pb", metric="geekbench_cpu_mean_power_w", unit="W", power_boundary="battery_net")]
+        _, comparison, markdown = self.report(rows)
+        self.assertIn("| 基线可用内存 | MiB | 1 | 2 | 100% | 1 / 1 |", markdown)
+        self.assertIn("| CPU 运行窗口平均功率（电池净变化） | W | — | -0.2 | — | 0 / 1 |", markdown)
+        self.assertEqual(next(g for g in comparison["groups"] if g["metric"] == "memory_baseline_available_bytes")["xhyper"]["mean"], 2097152)
 
     def test_row_validation_marker_cannot_be_overridden_by_formal_campaign(self):
         for marker in ({"validation_only": True}, {"purpose": "validation"}):
@@ -121,7 +131,7 @@ class ReportTests(unittest.TestCase):
         self.assertFalse(result["has_comparable_groups"])
         self.assertEqual(comparison["groups"][0]["native"]["values"], [0])
         self.assertIsNone(comparison["groups"][0]["delta_pct"])
-        self.assertIn("原厂均值为零，百分比没有定义", markdown)
+        self.assertIn("原生均值为零，百分比没有定义", markdown)
 
     def test_non_object_and_bad_mode_rows_do_not_destroy_report(self):
         _, comparison, markdown = self.report(["missing record", row([], None, "x", None)])
