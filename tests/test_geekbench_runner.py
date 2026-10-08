@@ -84,6 +84,17 @@ class BindingTests(unittest.TestCase):
         with self.assertRaisesRegex(runner.RunnerError, "raw_api"):
             self.bind(rec, kind="gpu", api="Vulkan")
 
+    def test_real_gpu_document_names_api_in_score_section(self):
+        rec = record(kind='gpu')
+        rec['document'].update(compute_platform_name='', compute_device_name='Mali-G57',
+                               metrics=[{'id': 5000, 'value': 'Mali-G57'}, {'id': 5002, 'value': '1.1.203'}],
+                               sections=[{'name': 'Vulkan', 'score': 2128}])
+        result = self.bind(rec, kind='gpu', api='Vulkan')
+        self.assertEqual(result['api_name_verified'], 'Vulkan')
+        self.assertTrue(result['gpu_hardware_verified'])
+        with self.assertRaisesRegex(runner.RunnerError, 'gpu_api_result_mismatch'):
+            self.bind(rec, kind='gpu', api='OpenCL')
+
     def test_software_gpu_is_rejected_and_hardware_identity_is_explicit(self):
         for software in ("SwiftShader", "llvmpipe", "lavapipe", "software renderer", "software device"):
             rec = record(kind="gpu")

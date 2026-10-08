@@ -129,6 +129,7 @@ def _document_api(document):
     # String evidence from the result, never an invented compute_api integer mapping.
     values = [document.get("compute_platform_name", "")]
     values.extend(metric.get("value", "") for metric in document.get("metrics", []) if isinstance(metric, dict))
+    values.extend(section.get("name", "") for section in document.get("sections", []) if isinstance(section, dict))
     found = {api for api in ("Vulkan", "OpenCL") if any(
         isinstance(value, str) and re.search(r"\b" + api + r"\b", value) for value in values)}
     return next(iter(found)) if len(found) == 1 else None
