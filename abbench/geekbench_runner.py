@@ -60,6 +60,10 @@ def find_target(nodes, *, resource=None, label=None):
                (resource and node.get("resource-id", "").endswith(":id/" + resource)) or
                (label and (node.get("text", "").strip().casefold() == label.casefold() or
                            node.get("content-desc", "").strip().casefold() == label.casefold()))]
+    if label and not resource:
+        clickable = [node for node in matches if node.get("clickable") == "true"]
+        if clickable:
+            matches = clickable
     # Do not collapse multiple targets to the first arbitrary coordinate.
     if len(matches) != 1:
         raise RunnerError("ui_target_missing_or_ambiguous:" + str(resource or label))

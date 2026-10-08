@@ -171,6 +171,12 @@ class UiTests(unittest.TestCase):
                 device.observe("home")
             self.assertEqual(timed.call_count, 3)
 
+    def test_tab_label_selects_unique_clickable_parent_not_text_child(self):
+        nodes = runner.ui_nodes('<hierarchy><node content-desc="GPU" clickable="true" bounds="[960,143][1140,215]"><node text="GPU" clickable="false" bounds="[1029,164][1071,193]"/></node></hierarchy>')
+        self.assertEqual(runner._center(runner.find_target(nodes, label="GPU")), (1050, 179))
+        with self.assertRaisesRegex(runner.RunnerError, "ambiguous"):
+            runner.find_target(nodes + [copy.deepcopy(nodes[0])], label="GPU")
+
 
 class FakeDevice:
     states = ["computing", "uploading"]
