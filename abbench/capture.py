@@ -127,6 +127,13 @@ def start_capture(serial, directory, duration_s=900, mode="unknown", config_path
         return result
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         result.update(state="failed", error=str(exc))
+        result["failure_returncode"] = getattr(exc, "returncode", None)
+        result["failure_timed_out"] = isinstance(exc, subprocess.TimeoutExpired)
+        for field in ("stdout", "stderr"):
+            value = getattr(exc, field, None) or ""
+            if isinstance(value, bytes):
+                value = value.decode(errors="replace")
+            (target / ("failure." + field + ".txt")).write_text(value)
         if "pid" in result and "before" in result and "process" in result:
             try:
                 cleanup = _signal_owned_session(serial, remote, result["pid"], result["before"]["boot_id"], result["process"])

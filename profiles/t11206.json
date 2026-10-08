@@ -2,7 +2,10 @@
   "schema_version": 1,
   "device_family": "T11206",
   "serial": "T11206HXH6600007",
-  "root_command": ["su", "0"],
+  "root_command": [
+    "su",
+    "0"
+  ],
   "geekbench_package": "com.primatelabs.geekbench6",
   "expected_app_version_from_preflight": "6.7.1",
   "battery_path": "/sys/class/power_supply/battery",
@@ -11,7 +14,10 @@
   "voltage_unit": "uV",
   "charge_unit": "uAh",
   "discharge_sign_candidate": -1,
-  "units_validated": false,
+  "units_validated": true,
+  "units_validation_reference": "docs/MATURE-TOOLS.md: 2026-10-08 同开机Perfetto与标准电池节点单位交叉核对；仅单位及来源，不表示校准。",
+  "current_sign_validated": true,
+  "current_sign_reference": "Android BatteryManager CURRENT_NOW 微安正充电负放电定义及本机单线程负载短测。",
   "counter_validated": false,
   "input_supply_verified_off": false,
   "input_suspend_control": null,
@@ -40,5 +46,16 @@
     "capacity_percent": 100,
     "charge_counter_uah": 8000000,
     "measurement_note": "满电且USB供电；不得将此状态的电池净电流解释为整机功耗。"
-  }
+  },
+  "identity_readback": {
+    "image_path": "/dev/block/by-name/boot_a",
+    "kernel_runtime_path": "/sys/kernel/notes",
+    "kernel_runtime_kind": "sha256",
+    "mode_evidence_source": "cmdline",
+    "mode_evidence_token": {
+      "xhyper": "xhyper.mode=host",
+      "native": null
+    }
+  },
+  "benchmark_max_start_battery_temperature_c": 40
 }

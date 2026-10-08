@@ -46,13 +46,19 @@ class CaptureTests(unittest.TestCase):
                 start_capture("serial", target, 15)
 
     def test_missing_pid_and_transport_failures_are_saved(self):
-        for reply in [subprocess.CompletedProcess([], 0, "not-a-pid", "warning"), subprocess.TimeoutExpired("adb", 35)]:
+        for reply in [subprocess.CompletedProcess([], 0, "not-a-pid", "warning"),
+                      subprocess.TimeoutExpired("adb", 35, output=b"partial-output", stderr=b"timeout-detail"),
+                      subprocess.CalledProcessError(1, ["adb"], output="partial-output", stderr="CONFIG_PARSE_FAILED_DETAIL")]:
             with tempfile.TemporaryDirectory() as directory:
                 target = Path(directory) / "capture"
                 with patch("abbench.capture.clock_probe", return_value=PROBE), patch("abbench.capture.adb"), patch("abbench.capture.shell", side_effect=[subprocess.CompletedProcess([], 0, "", ""), reply]):
                     with self.assertRaises(ValueError):
                         start_capture("serial", target, 15)
-                self.assertEqual(json.loads((target / "capture.json").read_text())["state"], "failed")
+                state = json.loads((target / "capture.json").read_text())
+                self.assertEqual(state["state"], "failed")
+                if isinstance(reply, subprocess.SubprocessError):
+                    self.assertEqual((target / "failure.stdout.txt").read_text(), "partial-output")
+                    self.assertIn("detail" if isinstance(reply, subprocess.TimeoutExpired) else "CONFIG_PARSE_FAILED_DETAIL", (target / "failure.stderr.txt").read_text())
 
     def test_stop_only_signals_its_private_session_and_preserves_trace(self):
         with tempfile.TemporaryDirectory() as directory:
