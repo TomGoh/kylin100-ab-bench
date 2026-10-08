@@ -122,6 +122,8 @@ class EnvironmentTests(unittest.TestCase):
                        "battery": {"temperature_is_live": True}}
         self.assertTrue(thermal_gate(environment, baseline_temperature_c=34)["valid"])
         self.assertFalse(thermal_gate(environment, baseline_temperature_c=33)["valid"])
+        self.assertEqual(thermal_gate(environment, baseline_temperature_c=37)["reason"],
+                         "battery_temperature_outside_baseline_tolerance")
         environment["battery_temperature_c"] = 40.1
         self.assertEqual(thermal_gate(environment)["reason"], "battery_temperature_above_start_limit")
         environment["battery"]["temperature_is_live"] = False

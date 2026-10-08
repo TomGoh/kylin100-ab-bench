@@ -55,7 +55,8 @@
     "mode_evidence_token": {
       "xhyper": "xhyper.mode=host",
       "native": null
-    }
+    },
+    "slot_suffix": "_a"
   },
   "benchmark_max_start_battery_temperature_c": 40
 }

@@ -272,8 +272,8 @@ def thermal_gate(environment, baseline_temperature_c=None, max_start_c=40.0, max
     elif baseline_temperature_c is not None:
         if isinstance(baseline_temperature_c, bool) or not isinstance(baseline_temperature_c, (int, float)) or not math.isfinite(baseline_temperature_c):
             raise ValueError("baseline temperature must be finite or null")
-        if temperature > baseline_temperature_c + max_delta_c:
-            result["reason"] = "battery_temperature_above_baseline_tolerance"
+        if abs(temperature - baseline_temperature_c) > max_delta_c:
+            result["reason"] = "battery_temperature_outside_baseline_tolerance"
         else:
             result["valid"] = True
     else:
