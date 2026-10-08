@@ -17,7 +17,9 @@ result = measure_boot("T11206HXH6600007", "runs/boot-001", timeout_s=180)
 
 探测结束后，工具保存当前开机的 `bootstat -p`、全部属性和事件缓冲区日志，再核对启动标识与完成属性。辅助记录权限不足或命令失败不会自动使启动终点无效，原始错误仍保留。最终标识无法核对、采集期间再次重启或完成属性不稳定时，该次记录为无效。
 
-桌面就绪需要解锁、前台桌面和绘制证据。本实现尚未适配这些字段，输出 `desktop_ready.value=null` 及原因，不把系统完成当成桌面可用。
+默认不观察桌面。调用者可以传入 `desktop=True`，工具在系统完成后最多再观察 15 秒，并服从剩余总预算。它动态解析 HOME 活动包名，联合核对用户 0 已解锁、启动动画已停止和当前 `mResumedActivity` 属于该桌面包。它保存原始证据，不调用界面树采集器，也不发送解锁或绘制操作。字段不支持或无法证实条件时，该阶段保留空值及原因，已经证实的系统完成仍可有效。
+
+这些条件只证明“桌面活动已恢复且用户已解锁”，不提供首次绘制证据。成功时 `desktop_resumed_observed.value=true`，`request_to_desktop_resumed_observed_s` 是首次观察该状态的代理上界，`request_to_desktop_resumed_interval_s` 同时保留误差区间。完整桌面绘制就绪仍使用 `desktop_ready.value=null`、`reason=first_draw_not_verified`，不能将这两个终点混为一谈。跨开机桌面证据使整次记录无效。
 
 ## 计时边界
 

@@ -6,6 +6,7 @@ desktop readiness. Reboot is opt-in, and must be announced by the caller.
 """
 import json
 import math
+import re
 import shlex
 import subprocess
 import time
@@ -24,6 +25,41 @@ AUXILIARY_COMMANDS = {
     "properties": "getprop",
     "boot-events": "logcat -b events -d -v monotonic",
 }
+
+DESKTOP_SCRIPT = """printf 'AB_DESKTOP_BOOT_BEFORE\\n'; cat /proc/sys/kernel/random/boot_id
+printf 'AB_DESKTOP_HOME\\n'; cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME
+printf '\\nAB_DESKTOP_UNLOCKED\\n'; cmd user is-user-unlocked 0
+printf '\\nAB_DESKTOP_BOOTANIM\\n'; getprop init.svc.bootanim
+printf 'AB_DESKTOP_BOOTANIM_EXIT\\n'; getprop service.bootanim.exit
+printf 'AB_DESKTOP_ACTIVITY\\n'; dumpsys activity activities
+printf '\\nAB_DESKTOP_BOOT_AFTER\\n'; cat /proc/sys/kernel/random/boot_id"""
+
+
+def parse_desktop_evidence(raw):
+    """Match current resumed fields, not history/intent text mentioning HOME."""
+    tags = ("BOOT_BEFORE", "HOME", "UNLOCKED", "BOOTANIM", "BOOTANIM_EXIT", "ACTIVITY", "BOOT_AFTER")
+    fields = {}
+    for index, tag in enumerate(tags):
+        stop = r"^AB_DESKTOP_" + tags[index + 1] + r"\n" if index + 1 < len(tags) else r"\Z"
+        match = re.search(r"^AB_DESKTOP_" + tag + r"\n(.*?)" + stop, raw.replace("\r\n", "\n"), re.M | re.S)
+        if not match:
+            raise ValueError("desktop_evidence_fields_missing")
+        fields[tag] = match.group(1).strip()
+    before, after = str(uuid.UUID(fields["BOOT_BEFORE"])), str(uuid.UUID(fields["BOOT_AFTER"]))
+    if before != after:
+        raise ValueError("desktop_probe_crossed_boot")
+    components = re.findall(r"(?m)^([A-Za-z][A-Za-z0-9_.]+)/(\.?[A-Za-z0-9_.$]+)$", fields["HOME"])
+    if len(components) != 1 or fields["UNLOCKED"] not in ("true", "false"):
+        raise ValueError("home_or_unlock_evidence_unavailable")
+    home_package = components[0][0]
+    resumed = set(re.findall(r"(?m)^\s*mResumedActivity[=:]\s*ActivityRecord\{[^}\n]*\s([A-Za-z][A-Za-z0-9_.]+)/[A-Za-z0-9_.$]+(?:\s|\})", fields["ACTIVITY"]))
+    unlocked = fields["UNLOCKED"] == "true"
+    animation_stopped = (fields["BOOTANIM"] == "stopped" or fields["BOOTANIM_EXIT"] == "1") and fields["BOOTANIM"] not in ("running", "restarting")
+    return {"boot_id": before, "home_package": home_package, "user_unlocked": unlocked,
+            "boot_animation_stopped": animation_stopped, "resumed_packages": sorted(resumed),
+            "launcher_resumed": resumed == {home_package},
+            "satisfied": unlocked and animation_stopped and resumed == {home_package},
+            "first_draw_verified": False}
 
 
 def parse_probe(stdout):
@@ -135,13 +171,14 @@ class _Acquisition:
 
 
 def measure_boot(serial, directory, timeout_s=180, reboot=False, *,
-                 poll_s=1, command_timeout_s=3):
+                 poll_s=1, command_timeout_s=3, desktop=False):
     """Save and return a bounded observation of an old-to-new boot transition.
 
     Default operation waits for an externally triggered reboot. It cannot know
     when a physical key or another process triggered that reboot. With explicit
     ``reboot=True`` it sends one normal ``adb reboot`` and reports a warm-reboot
-    request-to-system-completion proxy. It never measures desktop readiness.
+    request-to-system-completion proxy. Optional desktop evidence establishes
+    resumed/unlocked launcher state, never first-frame or desktop-drawn time.
     """
     if not isinstance(serial, str) or not serial.strip():
         raise ValueError("serial must be a nonempty string")
@@ -155,6 +192,8 @@ def measure_boot(serial, directory, timeout_s=180, reboot=False, *,
         raise ValueError("command_timeout_s must not exceed 5 seconds")
     if not isinstance(reboot, bool):
         raise ValueError("reboot must be a boolean")
+    if not isinstance(desktop, bool):
+        raise ValueError("desktop must be a boolean")
     target = Path(directory)
     target.mkdir(parents=True, exist_ok=False)
     start = time.monotonic()
@@ -180,6 +219,9 @@ def measure_boot(serial, directory, timeout_s=180, reboot=False, *,
         "request_to_system_complete_observed_s": None,
         "new_boot_access_to_system_complete_observed_s": None,
         "desktop_ready": {"value": None, "reason": "device_adapter_not_implemented"},
+        "desktop_resumed_observed": None,
+        "request_to_desktop_resumed_observed_s": None,
+        "request_to_desktop_resumed_interval_s": None,
         "auxiliary": {}, "limitations": [
             "not a full power-off cold-boot measurement",
             "ADB availability may follow actual system completion",
@@ -277,6 +319,45 @@ def measure_boot(serial, directory, timeout_s=180, reboot=False, *,
 
     # Reserve one bounded final identity read before optional diagnostics.
     auxiliary_deadline = deadline - command_timeout_s
+    if desktop:
+        result["desktop_ready"] = {"value": None, "reason": "first_draw_not_verified"}
+        result["desktop_resumed_observed"] = {"value": None, "reason": "desktop_observation_timeout",
+                                               "first_draw_verified": False}
+        desktop_deadline = min(auxiliary_deadline, time.monotonic() + 15)
+        last_desktop_not_ready = None
+        while time.monotonic() < desktop_deadline:
+            item = collector.shell("desktop-state", DESKTOP_SCRIPT, desktop_deadline)
+            if item is None:
+                break
+            if item["error"] is not None:
+                result["desktop_resumed_observed"]["reason"] = item["error"]
+                break
+            try:
+                evidence = parse_desktop_evidence(item["stdout"])
+            except ValueError as exc:
+                if str(exc) == "desktop_probe_crossed_boot":
+                    return finish("desktop_observation_cross_boot")
+                result["desktop_resumed_observed"]["reason"] = str(exc)
+                break
+            if evidence["boot_id"] != result["new_boot_id"]:
+                return finish("desktop_observation_cross_boot")
+            if evidence["satisfied"]:
+                desktop_lower = (last_desktop_not_ready["host_start_s"] if last_desktop_not_ready else
+                                 request["host_start_s"] if request else None)
+                result["desktop_resumed_observed"] = {
+                    "value": True, "reason": None, "evidence": evidence,
+                    "source": item["stdout_file"], "first_draw_verified": False,
+                    "interval_host_s": {"lower": desktop_lower, "upper": item["host_end_s"]},
+                    "boundary": "HOME launcher resumed, user unlocked, animation stopped; not first draw"}
+                if request:
+                    result["request_to_desktop_resumed_interval_s"] = {
+                        "lower": max(0, desktop_lower - request["host_start_s"]),
+                        "upper": item["host_end_s"] - request["host_start_s"]}
+                    result["request_to_desktop_resumed_observed_s"] = (
+                        result["request_to_desktop_resumed_interval_s"]["upper"])
+                break
+            last_desktop_not_ready = item
+            time.sleep(min(poll_s, max(0, desktop_deadline - time.monotonic())))
     for label, command in AUXILIARY_COMMANDS.items():
         item = collector.shell(label, command, auxiliary_deadline)
         if item is None:

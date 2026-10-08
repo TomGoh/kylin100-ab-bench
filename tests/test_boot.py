@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from abbench.boot import measure_boot, parse_probe
+from abbench.boot import measure_boot, parse_desktop_evidence, parse_probe
 
 
 OLD = "11111111-1111-4111-8111-111111111111"
@@ -16,6 +16,15 @@ THIRD = "33333333-3333-4333-8333-333333333333"
 def probe(boot_id=OLD, complete="1", uptime=100, after=None):
     return (f"boot_id_before={boot_id}\nboot_completed={complete}\n"
             f"uptime={uptime} 37.00\nboot_id_after={after or boot_id}\n")
+
+
+def desktop_evidence(*, unlocked="true", boot=NEW, resumed="com.example.launcher",
+                     home="com.example.launcher/.Launcher", animation="stopped", exit_value="1"):
+    return (f"AB_DESKTOP_BOOT_BEFORE\n{boot}\nAB_DESKTOP_HOME\n{home}\n"
+            f"AB_DESKTOP_UNLOCKED\n{unlocked}\nAB_DESKTOP_BOOTANIM\n{animation}\n"
+            f"AB_DESKTOP_BOOTANIM_EXIT\n{exit_value}\nAB_DESKTOP_ACTIVITY\n"
+            f"  mResumedActivity: ActivityRecord{{abcd u0 {resumed}/.Activity t1}}\n"
+            f"AB_DESKTOP_BOOT_AFTER\n{boot}\n")
 
 
 class Simulation:
@@ -54,6 +63,19 @@ class Simulation:
         if isinstance(value, Exception):
             raise value
         return subprocess.CompletedProcess(args, int(failed), value, "permission denied" if failed else "")
+
+
+class DesktopSimulation(Simulation):
+    def __init__(self, probes, desktop_outputs):
+        super().__init__(probes)
+        self.desktop_outputs = list(desktop_outputs)
+
+    def run(self, args, **kwargs):
+        if "AB_DESKTOP_BOOT_BEFORE" in args[-1]:
+            self.calls.append({"args": args, "start": self.now, "timeout": kwargs["timeout"]})
+            self.now += min(0.2, kwargs["timeout"])
+            return subprocess.CompletedProcess(args, 0, self.desktop_outputs.pop(0), "")
+        return super().run(args, **kwargs)
 
 
 class BootObserverTests(unittest.TestCase):
@@ -196,10 +218,46 @@ class BootObserverTests(unittest.TestCase):
                 for kwargs in ({"timeout_s": 0}, {"timeout_s": float("nan")},
                                {"poll_s": -1}, {"command_timeout_s": float("inf")},
                                {"reboot": "yes"}, {"timeout_s": True},
-                               {"timeout_s": 301}, {"command_timeout_s": 6}):
+                               {"timeout_s": 301}, {"command_timeout_s": 6}, {"desktop": "yes"}):
                     with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                         measure_boot("device", Path(temporary) / "unused", **kwargs)
                 run.assert_not_called()
+
+    def test_optional_desktop_reports_resumed_interval_not_first_draw(self):
+        simulation = DesktopSimulation([probe(), probe(NEW), probe(NEW)],
+                                       [desktop_evidence(unlocked="false"), desktop_evidence()])
+        result, _ = self.collect(simulation, reboot=True, desktop=True, timeout_s=15)
+        self.assertTrue(result["valid"])
+        self.assertTrue(result["desktop_resumed_observed"]["value"])
+        self.assertFalse(result["desktop_resumed_observed"]["first_draw_verified"])
+        self.assertIsNone(result["desktop_ready"]["value"])
+        interval = result["request_to_desktop_resumed_interval_s"]
+        self.assertLess(interval["lower"], interval["upper"])
+        self.assertEqual(result["request_to_desktop_resumed_observed_s"], interval["upper"])
+
+    def test_desktop_command_unavailable_preserves_valid_system_boot(self):
+        simulation = DesktopSimulation([probe(), probe(NEW), probe(NEW)], ["cmd unsupported\n"])
+        result, _ = self.collect(simulation, desktop=True, timeout_s=15)
+        self.assertTrue(result["valid"])
+        self.assertIsNone(result["desktop_resumed_observed"]["value"])
+        self.assertEqual(result["desktop_resumed_observed"]["reason"], "desktop_evidence_fields_missing")
+        self.assertIsNone(result["request_to_desktop_resumed_observed_s"])
+
+    def test_desktop_history_mentions_and_ambiguous_home_do_not_prove_resumed(self):
+        raw = desktop_evidence(resumed="com.example.other") + "Intent { cmp=com.example.launcher/.Launcher }\n"
+        # History mention is within activity output, not the actual resumed field.
+        raw = raw.replace("AB_DESKTOP_BOOT_AFTER", "History: com.example.launcher/.Launcher\nAB_DESKTOP_BOOT_AFTER")
+        raw = raw.rsplit("Intent", 1)[0]
+        self.assertFalse(parse_desktop_evidence(raw)["satisfied"])
+        self.assertFalse(parse_desktop_evidence(desktop_evidence(animation="running"))["satisfied"])
+        with self.assertRaises(ValueError):
+            parse_desktop_evidence(desktop_evidence(home="com.example.launcher/.Launcher\ncom.example.other/.Home"))
+
+    def test_desktop_new_boot_evidence_cannot_be_bound_to_another_boot(self):
+        simulation = DesktopSimulation([probe(), probe(NEW)], [desktop_evidence(boot=THIRD)])
+        result, _ = self.collect(simulation, desktop=True, timeout_s=15)
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "desktop_observation_cross_boot")
 
 
 if __name__ == "__main__":
