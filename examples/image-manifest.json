@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "images": {
+    "native": {
+      "image_sha256": null,
+      "host_kernel_sha256": null,
+      "kernel_runtime_id": null,
+      "android_fingerprint": null,
+      "app_apk_sha256": null,
+      "app_version": null,
+      "mode_evidence": null,
+      "normal_configuration_confirmed": false,
+      "identity_verified_on_device": false
+    },
+    "xhyper": {
+      "image_sha256": null,
+      "host_kernel_sha256": null,
+      "kernel_runtime_id": null,
+      "android_fingerprint": null,
+      "app_apk_sha256": null,
+      "app_version": null,
+      "mode_evidence": null,
+      "normal_configuration_confirmed": false,
+      "identity_verified_on_device": false,
+      "xhyper_commit": null,
+      "manager_commit": null,
+      "build_configuration": null,
+      "diagnostic_features": []
+    }
+  }
+}

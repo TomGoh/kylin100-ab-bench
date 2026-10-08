@@ -1,0 +1,10 @@
+{
+  "power_boundary": "battery_net",
+  "discharge_sign": -1,
+  "input_supply_verified_off": false,
+  "counter_validated": false,
+  "max_gap_s": 3,
+  "counter_resolution_uah": null,
+  "window_start_s": null,
+  "window_end_s": null
+}
