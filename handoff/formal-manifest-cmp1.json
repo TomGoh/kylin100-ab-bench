@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "images": {
+    "native": {
+      "image_sha256": "30e41ac4ae3302e2a276259786cd25af3386f9fee7e83712d53c9c50a0ba61a4",
+      "host_kernel_sha256": "16ecc6dd6c7083aec8590b96d92783d06c7305e2756eefa2b2f2bf529501cad9",
+      "kernel_runtime_id": "a898c6b298cea064af67032ac93d4dd053f0b1f58a076e5090753f7e3aa2afbe",
+      "android_fingerprint": "AOC/ums9620_2h10_native/ums9620_2h10:16/BP2A.250605.031.A3/eng.root:userdebug/release-keys",
+      "app_apk_sha256": "5158197864c0b99ad28e94b0000a0f6abdb3b66296b5b6038ead8abc6fe3dca4",
+      "app_version": "6.7.1",
+      "mode_evidence": "boot_a = stock boot of the 2026-10-08 system (no hypervisor); dmesg 'CPU: All CPU(s) started at EL2' and 'kvm [1]: KVM disabled from command line'; /proc/cmdline without xhyper.mode=host; MemTotal 5511788 kB. Read on the device 2026-10-08 14:21 (boot 6691a8fd, runs/adapter-check-20261008/native-evidence.txt).",
+      "normal_configuration_confirmed": true,
+      "identity_verified_on_device": true,
+      "notes": "vendor_boot_a e557a0dd (loglevel=1) is shared by both modes; boot_b stays this stock boot as the bootloader fallback."
+    },
+    "xhyper": {
+      "image_sha256": "0235c68c674cce9b53db7f9dbc618fdddbea6c74b39d3511d0e50fdeec0e82dc",
+      "host_kernel_sha256": "16ecc6dd6c7083aec8590b96d92783d06c7305e2756eefa2b2f2bf529501cad9",
+      "kernel_runtime_id": "a898c6b298cea064af67032ac93d4dd053f0b1f58a076e5090753f7e3aa2afbe",
+      "android_fingerprint": "AOC/ums9620_2h10_native/ums9620_2h10:16/BP2A.250605.031.A3/eng.root:userdebug/release-keys",
+      "app_apk_sha256": "5158197864c0b99ad28e94b0000a0f6abdb3b66296b5b6038ead8abc6fe3dca4",
+      "app_version": "6.7.1",
+      "mode_evidence": "/proc/cmdline contains xhyper.mode=host; dmesg 'KVM is not available. Ignoring kvm-arm.mode' and 'CPU: All CPU(s) started at EL1'; MemTotal 5414472 kB. Read on the device 2026-10-08 14:22 (boot cdbe71f1, runs/adapter-check-20261008/xhyper-evidence.txt).",
+      "normal_configuration_confirmed": true,
+      "identity_verified_on_device": true,
+      "xhyper_commit": "c815907c85bf825155f46cd58dfefa9d24c7cb1a",
+      "manager_commit": "a438ee9a62864f1c632aa2888d06c2d10401eeaf",
+      "build_configuration": "platforms/kplat-aarch64/t11206_defconfig with LOG_LEVEL_WARN instead of LOG_LEVEL_INFO; KFEAT_EL2_BLACKBOX and KFEAT_EL2_BLACKBOX_EXIT_TIMING off (defconfig default); release build on the x86 host from the clean commit (git_dirty=false); Manager package rootvm-a438ee9 (sha256 a68faa5c...); Host kernel = the stock Image 16ecc6dd; signed with the stock AVB key (sha1 3450b118), rollback index 0",
+      "diagnostic_features": [],
+      "notes": "cmp1. Code = the latest Gerrit patch sets of 9120-9146/9167, 9136, 9131-9135, 9154-9169 stacked on main 95a185f9, plus one conflict resolution (expire_cpu_timers keeps 9126's usize return) and a test-only commit. The committed code still has always-on diagnostic counters and rare console lines (about 100 lines per 20 minutes); cmp2 removes them."
+    }
+  }
+}

@@ -1,0 +1,6 @@
+[
+  "python3", "handoff/t11206_mode_switch.py",
+  "--mode", "{mode}",
+  "--serial", "{serial}",
+  "--output", "{out}"
+]

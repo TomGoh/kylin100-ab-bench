@@ -1,0 +1,15 @@
+{
+  "comment": "Images the mode-switch adapter writes to boot_a. device_copy is kept on the tablet; local_file (relative to this directory, optional, not in git) is pushed only if the tablet copy is missing or wrong. xhyper = cmp1 (c815907c). For cmp2 use t11206-images-cmp2.json.",
+  "native": {
+    "name": "stock boot of the 2026-10-08 system (Android 16 BP2A.250605.031.A3)",
+    "sha256": "30e41ac4ae3302e2a276259786cd25af3386f9fee7e83712d53c9c50a0ba61a4",
+    "device_copy": "/data/local/tmp/boot_a.stock-20261008.img",
+    "local_file": "images/boot_a.stock-20261008.img"
+  },
+  "xhyper": {
+    "name": "XHyper cmp1 (c815907c, t11206_defconfig + LOG_LEVEL_WARN, no black box)",
+    "sha256": "0235c68c674cce9b53db7f9dbc618fdddbea6c74b39d3511d0e50fdeec0e82dc",
+    "device_copy": "/data/local/tmp/xhyper_boot-cmp1.img",
+    "local_file": "images/xhyper_boot-cmp1.img"
+  }
+}
