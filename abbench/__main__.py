@@ -49,6 +49,21 @@ def main():
     p = sub.add_parser("doctor", help="只读能力快照；不自动确认计量能力")
     p.add_argument("--serial", required=True)
     p.add_argument("--out", required=True)
+    p = sub.add_parser("boot", help="观察新启动；只有显式 --reboot 才请求设备重启")
+    p.add_argument("--serial", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--timeout", type=float, default=180)
+    p.add_argument("--reboot", action="store_true")
+    p = sub.add_parser("capture-start", help="启动一个有时长上限的设备本地 Perfetto 会话")
+    p.add_argument("--serial", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--duration", type=int, default=900)
+    p.add_argument("--mode", choices=("native", "xhyper", "unknown"), default="unknown")
+    for command in ("capture-stop", "mark"):
+        p = sub.add_parser(command)
+        p.add_argument("--run-dir", required=True)
+        if command == "mark":
+            p.add_argument("--event", required=True)
     p.add_argument("--timeout", type=float, default=12)
     p = sub.add_parser("validate-manifest", help="核对镜像交付清单")
     p.add_argument("input")
@@ -113,6 +128,26 @@ def main():
         elif args.command == "pull-root":
             from .adb_io import pull_root
             result = pull_root(args.serial, args.remote_dir, args.out)
+            emit(result)
+            return 0
+        elif args.command == "boot":
+            from .boot import measure_boot
+            if args.reboot:
+                print("即将请求平板重启，并观察新的启动标识。", file=sys.stderr, flush=True)
+            result = measure_boot(args.serial, args.out, args.timeout, args.reboot)
+        elif args.command == "capture-start":
+            from .capture import start_capture
+            result = start_capture(args.serial, args.out, args.duration, args.mode)
+            emit(result)
+            return 0
+        elif args.command == "capture-stop":
+            from .capture import stop_capture
+            result = stop_capture(args.run_dir)
+            emit(result)
+            return 0
+        elif args.command == "mark":
+            from .capture import mark_event
+            result = mark_event(args.run_dir, args.event)
             emit(result)
             return 0
         else:
