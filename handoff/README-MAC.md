@@ -76,3 +76,11 @@
 - 宿主在 XHyper 下运行在 EL1（`All CPU(s) started at EL1`），没有 KVM；原生运行在 EL2，KVM 被命令行关闭。
 - XHyper 下宿主设备树的 TRNG 节点被关闭，宿主没有硬件随机数源。
 - cmp1 还带不受开关控制的诊断计数和打印（见第三节）；cmp2 没有。
+
+## 七、第二块平板 T11206HXH6700075（2026-10-08 14:40 核对）
+
+- 系统、内核标识（`/sys/kernel/notes` `a898c6b2…`）、vendor_boot（`e557a0dd…`）与 6600007 相同；boot_a 已是 cmp1（`0235c68c…`，正在 XHyper 下运行，有 `xhyper.mode=host`），boot_b 是原厂 `30e41ac4…`；Geekbench 6.7.1，APK 集合摘要与 6600007 相同（`51581978…`）。所以 `formal-manifest-cmp1.json` 和适配器两块平板共用。
+- 平板上已放好镜像副本：`/data/local/tmp/boot_a.stock-20261008.img`（从 boot_b 复制，`30e41ac4…`）、`/data/local/tmp/xhyper_boot-cmp1.img`（`0235c68c…`）。
+- 设备配置 `profiles/t11206-HXH6700075.json`：复制 `t11206.json`，只改 `serial`。它的电源接口清单摘要实测与 6600007 相同（`7815b686…`，`abbench supply` 读回）。配置里 `observed_preflight` 等观察值来自 6600007，以该平板自己的预检为准。
+- 这块平板还没有用适配器切到原厂开过机；正式运行时框架会在每侧核对身份。
+- 两块同时测：各开一个 `campaign`，`--serial`、`--profile`、`--out` 各用自己的，清单和适配器参数相同。
