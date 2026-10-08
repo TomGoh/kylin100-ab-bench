@@ -59,6 +59,8 @@ t_s,read_end_s,boot_id,voltage_uv,current_ua,charge_uah,external_online,battery_
 
 配置见 `examples/power-config.json`。`discharge_sign` 是原始放电电流的符号，取 `-1` 或 `1`；计算器不使用绝对值。`max_gap_s` 限制可线性积分的间断，默认正式每秒采样时为 3 秒。空窗口表示使用完整采样覆盖；指定窗口需要已验证的计算边界，并且完全落在采样范围内。
 
+`max_read_span_s` 是可选读取耗时门槛，参考配置设为 0.25 秒。这是实验约束，不是传感器精度。启用时，每条记录必须提供有效的 `read_end_s`，超时或缺失使积分无效。输出保留实际读数间隔及读取耗时；设为空值时不检查耗时，但不能据此声称多个字段同时读取。
+
 `power_boundary` 支持 `battery_net` 和 `battery_side_device`。前者的能量为带符号净变化，正值表示电池放电、负值表示充电；它不能作为整机能耗。后者还需整段外部输入确实断开。计量器的实际单位、方向、刷新率和覆盖范围由执行前校准记录约束。
 
 端点命令输入为 `{"start": {...}, "end": {...}, "config": {...}}`，两端均包含 `t_s`、`boot_id`、`voltage_uv`、`charge_uah`、`external_online`。配置需 `counter_validated=true`。可选 `counter_resolution_uah` 用于量化误差提示；零变化不输出零功耗。端点电压只支持平均电压近似，同时输出平均放电电流，不能把近似值写成精确功率。

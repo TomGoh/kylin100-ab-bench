@@ -64,6 +64,9 @@ def _config_reason(config, *, needs_current):
         gap = config.get("max_gap_s")
         if not _number(gap) or gap <= 0:
             return "invalid_max_gap_s"
+        read_span = config.get("max_read_span_s")
+        if read_span is not None and (not _number(read_span) or read_span <= 0):
+            return "invalid_max_read_span_s"
     return None
 
 
@@ -137,6 +140,8 @@ def integrate(samples, config):
         return _result(config, method, "insufficient_samples")
 
     points = []
+    read_spans = []
+    gaps = []
     boot_id = None
     previous_time = None
     for index, sample in enumerate(rows):
@@ -151,11 +156,23 @@ def integrate(samples, config):
         elif sample["boot_id"] != boot_id:
             return _result(config, method, "cross_boot_samples", invalid_sample_index=index)
         t_s = sample["t_s"]
+        if "read_end_s" in sample:
+            read_end = sample["read_end_s"]
+            if not _number(read_end) or read_end < t_s:
+                return _result(config, method, "invalid_read_end_s", invalid_sample_index=index)
+            span = read_end - t_s
+            read_spans.append(span)
+            if config.get("max_read_span_s") is not None and span > config["max_read_span_s"]:
+                return _result(config, method, "read_span_exceeded", invalid_sample_index=index,
+                               observed_read_span_s=span)
+        elif config.get("max_read_span_s") is not None:
+            return _result(config, method, "read_span_unknown", invalid_sample_index=index)
         if previous_time is not None:
             if t_s <= previous_time:
                 return _result(config, method, "non_increasing_time", invalid_sample_index=index)
             if t_s - previous_time > config["max_gap_s"]:
                 return _result(config, method, "sample_gap_exceeded", invalid_sample_index=index)
+            gaps.append(t_s - previous_time)
         power_w = (sample["voltage_uv"] / 1e6) * (sample["current_ua"] / 1e6) * config["discharge_sign"]
         if not isfinite(power_w):
             return _result(config, method, "nonfinite_calculated_power", invalid_sample_index=index)
@@ -201,6 +218,12 @@ def integrate(samples, config):
         max_sampled_power_w=max(observed_powers) if observed_powers else None,
         maximum_note="sample_maximum_not_true_instantaneous_peak",
         discharge_sign=config["discharge_sign"],
+        actual_sample_gap_max_s=max(gaps),
+        actual_sample_gap_mean_s=fsum(gaps) / len(gaps),
+        read_span_sample_count=len(read_spans),
+        read_span_max_s=max(read_spans) if read_spans else None,
+        read_span_mean_s=fsum(read_spans) / len(read_spans) if read_spans else None,
+        read_span_note="field_read_window_not_sensor_update_or_calibration_error",
         input_supply_verified_off=config.get("input_supply_verified_off", False),
     )
 

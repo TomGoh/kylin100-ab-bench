@@ -7,6 +7,7 @@
 ## 先读这些文件
 
 - [总体设计](docs/DESIGN.md)定义主要指标、供电边界、测试矩阵和有效性。
+- [成熟工具选择](docs/MATURE-TOOLS.md)说明 Perfetto 优先方案、系统启动记录和本机模拟 PowerStats 通道的排除。
 - [启动及性能方法](docs/benchmark-method.md)定义计时终点、完整结果导出和 GPU 覆盖范围。
 - [功耗方法](docs/power-method.md)定义传感器验证、积分和低干扰待机测量。
 - [内存方法](docs/memory-method.md)区分 Android 可见占用、压缩交换内存和虚拟化层保留内存。
@@ -26,13 +27,15 @@ python3 -m abbench export-geekbench --db /path/to/consistent/history.db --out ou
 python3 -m abbench power --samples /path/to/samples.csv --config /path/to/power-config.json --out out/power.json
 python3 -m abbench endpoint --input /path/to/endpoints.json --out out/standby.json
 python3 -m abbench memory --meminfo /path/to/meminfo.txt --zram /path/to/zram-mm-stat.txt --out out/memory.json
+python3 -m abbench perfetto-export --trace /path/to/trace.perfetto-trace --processor /path/to/trace_processor --out out/trace-export
+python3 -m abbench pull-root --serial T11206HXH6600007 --remote-dir /data/local/tmp/ab-run --out runs/run-001/root-output
 python3 -m abbench compare --input /path/to/metric-rows.json --out out/comparison.json
 python3 -m unittest discover -s tests -v
 ```
 
 示例镜像清单故意使用空哈希与未确认状态；验证失败说明它还不能用于正式计分。设备配置中的计量能力也保持未验证状态，不能因为路径存在就改成已验证。
 
-设备内 [采样脚本](device/sample-battery.sh)只读取已指定节点，不改变频率、充电、电池参数或屏幕。它适用于亮屏计算负载；熄屏待机应使用经验证的累计计量端点，避免周期采样唤醒设备。设备部署及开销核对方法见总体设计。
+亮屏负载优先采用 [Perfetto 配置](configs/perfetto-power-memory.pbtxt)和官方 Trace Processor。设备内 [采样脚本](device/sample-battery.sh)保留为缺少接口或交叉读取时的降级方案。熄屏待机应使用经验证的累计计量端点，避免周期采样唤醒设备。
 
 设备内 [内存快照脚本](device/snapshot-memory.sh)保存三次轻量内存读数及对应设备时间。完整进程内存统计放在功耗窗口之外；它不能量出 Android 看不到的 XHyper 保留区。
 

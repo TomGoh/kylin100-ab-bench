@@ -67,6 +67,14 @@ def main():
     p.add_argument("--meminfo", required=True)
     p.add_argument("--zram")
     p.add_argument("--out")
+    p = sub.add_parser("perfetto-export", help="调用已有官方 Trace Processor 导出原始计数器")
+    p.add_argument("--trace", required=True)
+    p.add_argument("--processor", required=True)
+    p.add_argument("--out", required=True)
+    p = sub.add_parser("pull-root", help="使用现有 su/tar 导出 Root 生成的测试文件")
+    p.add_argument("--serial", required=True)
+    p.add_argument("--remote-dir", required=True)
+    p.add_argument("--out", required=True)
     args = parser.parse_args()
     try:
         if args.command == "doctor":
@@ -97,6 +105,16 @@ def main():
             result = summarize_snapshot(
                 Path(args.meminfo).read_text(encoding="utf-8"),
                 Path(args.zram).read_text(encoding="utf-8") if args.zram else None)
+        elif args.command == "perfetto-export":
+            from .perfetto import export_trace
+            result = export_trace(args.trace, args.processor, args.out)
+            emit(result)
+            return 0
+        elif args.command == "pull-root":
+            from .adb_io import pull_root
+            result = pull_root(args.serial, args.remote_dir, args.out)
+            emit(result)
+            return 0
         else:
             from .power import endpoint
             data = read_json(args.input)

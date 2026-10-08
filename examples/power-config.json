@@ -4,6 +4,7 @@
   "input_supply_verified_off": false,
   "counter_validated": false,
   "max_gap_s": 3,
+  "max_read_span_s": 0.25,
   "counter_resolution_uah": null,
   "window_start_s": null,
   "window_end_s": null

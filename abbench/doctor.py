@@ -16,6 +16,10 @@ COMMANDS = {
     "services": "service list",
     "suspend-counters": "cat /sys/power/suspend_stats/success /sys/power/suspend_stats/fail /sys/kernel/debug/suspend_stats /sys/kernel/debug/suspend_time 2>/dev/null",
     "memory": 'cat /proc/meminfo; cat /proc/swaps; for p in /sys/block/zram*; do printf "\\n%s\\n" "$p"; cat "$p/mm_stat" "$p/disksize" 2>/dev/null; done',
+    "perfetto": "perfetto --version; perfetto --query",
+    "powerstats": "dumpsys powerstats; ps -A -o PID,NAME,ARGS",
+    "suspend-service": "dumpsys suspend_control_internal",
+    "bootstat": "bootstat -p",
 }
 
 
@@ -53,5 +57,9 @@ def snapshot(serial, directory, timeout_s=12):
     result["unavailable_or_failed_commands"] = [
         key for key, value in result["commands"].items()
         if value["returncode"] != 0 or value["timed_out"]]
+    from .perfetto import assess_powerstats
+    powerstats_path = target / "powerstats.txt"
+    powerstats_text = powerstats_path.read_text(encoding="utf-8") if powerstats_path.exists() else ""
+    result["powerstats_assessment"] = assess_powerstats(powerstats_text, powerstats_text)
     (target / "snapshot.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return result

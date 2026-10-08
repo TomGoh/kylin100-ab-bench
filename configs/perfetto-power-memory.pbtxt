@@ -1,0 +1,44 @@
+# Official Perfetto sources. Duration covers a typical complete CPU benchmark.
+# Stop/trim by verified compute events; this duration is not a benchmark timer.
+buffers { size_kb: 8192 fill_policy: RING_BUFFER }
+duration_ms: 900000
+data_sources {
+  config {
+    name: "android.power"
+    android_power_config {
+      battery_poll_ms: 1000
+      battery_counters: BATTERY_COUNTER_CHARGE
+      battery_counters: BATTERY_COUNTER_CAPACITY_PERCENT
+      battery_counters: BATTERY_COUNTER_CURRENT
+      battery_counters: BATTERY_COUNTER_CURRENT_AVG
+      battery_counters: BATTERY_COUNTER_VOLTAGE
+      # Enable these only after hardware/source validation. T11206 currently
+      # runs an example service with fake rail, consumer and residency data.
+      collect_power_rails: false
+      collect_energy_estimation_breakdown: false
+      collect_entity_state_residency: false
+    }
+  }
+}
+data_sources {
+  config {
+    name: "linux.sys_stats"
+    sys_stats_config {
+      meminfo_period_ms: 5000
+      meminfo_counters: MEMINFO_MEM_TOTAL
+      meminfo_counters: MEMINFO_MEM_FREE
+      meminfo_counters: MEMINFO_MEM_AVAILABLE
+      meminfo_counters: MEMINFO_BUFFERS
+      meminfo_counters: MEMINFO_CACHED
+      meminfo_counters: MEMINFO_SLAB
+      meminfo_counters: MEMINFO_SLAB_RECLAIMABLE
+      meminfo_counters: MEMINFO_SLAB_UNRECLAIMABLE
+      meminfo_counters: MEMINFO_KERNEL_STACK
+      meminfo_counters: MEMINFO_PAGE_TABLES
+      meminfo_counters: MEMINFO_SWAP_TOTAL
+      meminfo_counters: MEMINFO_SWAP_FREE
+      meminfo_counters: MEMINFO_CMA_TOTAL
+      meminfo_counters: MEMINFO_CMA_FREE
+    }
+  }
+}

@@ -1,5 +1,7 @@
 #!/system/bin/sh
 # Read-only reference sampler. Use for awake workloads, not deep standby.
+# INTERVAL_S is sleep after a read, not the true sampling period. Always check
+# read_end_s-t_s and actual gaps; some sysfs reads take close to one second.
 # Usage: sh sample-battery.sh OUTPUT DURATION_S INTERVAL_S [BATTERY_DIR] [USB_ONLINE]
 set -eu
 out=${1:?output required}

@@ -23,6 +23,18 @@ def config(**overrides):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_read_latency_and_actual_cadence_are_reported_or_refused(self):
+        rows = [dict(sample(0), read_end_s=0.1), dict(sample(2), read_end_s=2.2)]
+        result = integrate(rows, config(max_read_span_s=0.25))
+        self.assertTrue(result["valid"])
+        self.assertAlmostEqual(result["read_span_max_s"], 0.2)
+        self.assertEqual(result["actual_sample_gap_mean_s"], 2)
+        delayed = [dict(sample(0), read_end_s=0.9), dict(sample(2), read_end_s=2.9)]
+        self.assertEqual(integrate(delayed, config(max_read_span_s=0.25))["reason"], "read_span_exceeded")
+        self.assertEqual(integrate([sample(0), sample(2)], config(max_read_span_s=0.25))["reason"], "read_span_unknown")
+        self.assertEqual(integrate(rows, config(max_read_span_s=-1))["reason"], "invalid_max_read_span_s")
+        self.assertEqual(integrate([dict(sample(0), read_end_s=-1), sample(2)], config())["reason"], "invalid_read_end_s")
+
     def test_known_two_watts_for_ten_seconds(self):
         result = integrate([sample(0), sample(10)], config())
         self.assertTrue(result["valid"])
